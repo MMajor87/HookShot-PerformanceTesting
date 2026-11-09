@@ -1820,6 +1820,15 @@ bool table_track_open(int logged, int seen, int unlimited) {
 }
 
 // ---- (local test, 2026-11-08) a stage's sampled textures kept from the last build of the program: build_descriptors ----
+// (local test, 2026-11-08: RX_VK_DUMP_UBO=<prog>: in a dump, also every layer of that program's sampled array textures, at end_pass)
+thread_local std::vector<Texture*> dump_layer_texs;
+bool dump_layers_wanted(uint64_t key) {
+    static const char* want = getenv("RX_VK_DUMP_UBO");
+    if (!want) return false;
+    char hex[24];
+    snprintf(hex, sizeof hex, "%016llx", (unsigned long long)key);
+    return !strncmp(hex, want, std::min<size_t>(16, strcspn(want, ",")));
+}
 thread_local uint64_t desc_epoch = 1;   // (bumped where last_desc_valid is cleared: a new command buffer, descriptors disturbed)
 struct TexReuse {
     const Program* prog = nullptr;
@@ -2219,6 +2228,9 @@ void build_descriptors(const NvnState& s, const Program& p) {
                                tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->layers : 0, tex ? (void*)tex->image : nullptr,
                                (void*)view, view ? "" : " (dummy)");
                 if (view && tex && tex->gpu_written) draw_sampled.push_back(tex);
+                if (dump_on() && view && tex && tex->layers > 1 && dump_layer_texs.size() < 8 && dump_layers_wanted(p.key) &&
+                    std::find(dump_layer_texs.begin(), dump_layer_texs.end(), tex) == dump_layer_texs.end())
+                    dump_layer_texs.push_back(tex);
                 if (tr_eligible) tr->texs.push_back(view ? tex : nullptr);
                 if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0;
                 dw.imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
@@ -3632,6 +3644,23 @@ void probe_log(uint64_t f) {
 // (amd-fix, diagnosis) in a frame dump, the indirect mesh draws' arguments as the GPU has them: noted at the draw (inside
 // the pass, where no copy can be recorded) and copied out once the pass ends ("dump buffer ... mesh indirect")
 thread_local std::vector<std::pair<uint64_t, uint64_t>> dump_mesh_indirect;   // (program key, indirect address)
+// (local test, 2026-11-08: RX_VK_DUMP_UBO=<prog>[,...]: in a dump, those programs' uniform buffers c3+ as the draw binds them, copied
+// out when the pass ends and written raw as ubo_*.bin files)
+struct DumpUbo { VkBuffer buffer; uint64_t offset, size; std::string what; };
+thread_local std::vector<DumpUbo> dump_ubos;
+bool dump_ubo_wanted(uint64_t key) {
+    static const char* want = getenv("RX_VK_DUMP_UBO");
+    if (!want) return false;
+    char hex[24];
+    snprintf(hex, sizeof hex, "%016llx", (unsigned long long)key);
+    for (const char* q = want; *q;) {
+        const char* e = strchr(q, ',');
+        const size_t len = e ? (size_t)(e - q) : strlen(q);
+        if (len && !strncmp(hex, q, len)) return true;
+        q = e ? e + 1 : q + len;
+    }
+    return false;
+}
 void end_pass(VkCommandBuffer cmd) {
     if (!pass.open) return;
     vkCmdEndRendering(cmd);
@@ -3648,6 +3677,19 @@ void end_pass(VkCommandBuffer cmd) {
             if (r.buffer) dump_buffer(cmd, r.buffer, r.offset, got, what);
         }
         dump_mesh_indirect.clear();
+    }
+    if (dump_on() && !dump_layer_texs.empty()) {
+        for (Texture* t : dump_layer_texs)
+            for (uint32_t layer = 0; layer < std::min<uint32_t>(t->layers, 128); layer++) {
+                char what[96];
+                snprintf(what, sizeof what, "layer tex%u L%02u", t->id, layer);
+                dump_image(cmd, t, 0, layer, what);
+            }
+        dump_layer_texs.clear();
+    }
+    if (dump_on() && !dump_ubos.empty()) {
+        for (const DumpUbo& u : dump_ubos) dump_buffer(cmd, u.buffer, u.offset, u.size, u.what.c_str());
+        dump_ubos.clear();
     }
     if (probe_on())
         for (int i = 0; i < pass.n; i++)
@@ -4733,6 +4775,28 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         }
     }
     if (dump_on()) log_dump_draw(s, p, d);
+    if (dump_on() && dump_ubo_wanted(p.key) && dump_ubos.size() < 64) {   // (local test: RX_VK_DUMP_UBO)
+        size_t ub = 0;   // (the uniform buffer writes in build_descriptors' order: stage by stage, descriptor by descriptor)
+        std::vector<const VkDescriptorBufferInfo*> ubis;
+        for (const VkWriteDescriptorSet& w : dw.writes)
+            if (w.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && w.pBufferInfo)
+                for (uint32_t i = 0; i < w.descriptorCount; i++) ubis.push_back(&w.pBufferInfo[i]);
+        for (const Stage& st : p.stages)
+            for (const auto& cd : st.info.constant_buffer_descriptors)
+                for (uint32_t k = 0; k < cd.count; k++, ub++) {
+                    const uint32_t index = cd.index + k;
+                    if (index < 3 || ub >= ubis.size()) continue;
+                    const VkDescriptorBufferInfo& bi = *ubis[ub];
+                    const nvn_p_bind_buf& u = s.ubo[std::clamp(st.nvn_stage, 0, kNvnStages - 1)][std::min<uint32_t>(index - 3, 15)];
+                    char what[160];
+                    snprintf(what, sizeof what, "ubo %03d prog %016llx stage %d c%u (game %#llx +%#llx, bound +%#llx)", dump_seq(),
+                             (unsigned long long)p.key, st.nvn_stage, index, (unsigned long long)u.addr, (unsigned long long)u.size,
+                             (unsigned long long)bi.range);
+                    logf("vk: dump %s", what);
+                    if (bi.buffer && bi.range && bi.range != VK_WHOLE_SIZE)
+                        dump_ubos.push_back({bi.buffer, bi.offset, bi.range, what});
+                }
+    }
     PROF(PROF_CMDS);
     texture_watch_prog(p.key);
     if (!same_desc) gfx_sampled = draw_sampled;

@@ -452,7 +452,7 @@ void dump_write() {
         for (size_t i = 0; i < nw && shown < 24 && k < 1100; i++)
             if (w[i]) k += snprintf(line + k, sizeof line - k, " [%zu]=%#x", i, w[i]), shown++;
         logf("%s", line);
-        if (it.n > 65536) {   // (local test: the whole copy, raw)
+        if (it.n > 65536 || !it.what.compare(0, 4, "ubo ")) {   // (local test: the whole copy, raw)
             static int nfile;
             const std::string path = dir + "/buf_" + std::to_string(nfile++) + ".bin";
             if (FILE* f = fopen(path.c_str(), "wb")) {
