@@ -63,6 +63,7 @@ int64_t prof_ns[PROF_COUNT];
 Device dev;
 PFN_vkGetInstanceProcAddr instance_proc() { return vkx::instance_proc_addr(); }
 
+void perf_update_check();   // (local: vk_update.cpp)
 void logf(const char* fmt, ...) {
     char b[1024];
     std::va_list a;
@@ -83,6 +84,7 @@ bool has_extension(const std::vector<VkExtensionProperties>& all, const char* na
 
 bool create_instance() {
     deep_capture_settings();   // (local: RX_VK_DEEP, before any capture setting is read)
+    perf_update_check();       // (local: vk_update.cpp, the testing repository's releases)
     uint32_t version = VK_API_VERSION_1_0;
     if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&version);
     if (version < VK_API_VERSION_1_3) {
