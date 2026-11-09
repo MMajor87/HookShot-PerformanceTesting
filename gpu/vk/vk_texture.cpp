@@ -2892,11 +2892,20 @@ void texture_frame(uint64_t completed) {
     if (frame_no % 10) return;
     uint64_t used = 0, allowed = 0, block_free = 0;
     const bool known = vram_usage(&used, &allowed, &block_free);
-    if (!own)   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)
+    if (!own) {   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)
+        // (HookShot-PerformanceTesting, 2026-11-09) where the driver allows 12 GB or more, 60% of it rather than the 6 GB cap. On a
+        // 16 GB card (15.2 GB allowed) Hyrule Castle's textures sat at the 6 GB cap: textures evicted and made again every frame
+        // while walking, the renderer at 16-17.6 ms and 40-45 fps. 60% is ~9 GB there; the budget still shrinks by itself near
+        // what the driver allows (below). Smaller cards keep the rule as it was
+        const uint64_t big_card = 12ull << 30;
         own = getenv("RX_VK_VRAM_MB") ? (uint64_t)atoi(getenv("RX_VK_VRAM_MB")) << 20
+              : known && allowed >= big_card ? allowed / 10 * 6
               : known                ? std::min<uint64_t>(allowed / 10 * 7, 6144ull << 20)   // (hookshot: at most 6 GB. A 16 GB
                                                                                              // card's 10.8 GB filled up, read as a leak: 105, 106)
                                      : 4096ull << 20;
+        logf("vk: texture budget %llu MB (%s)", (unsigned long long)(own >> 20),
+             getenv("RX_VK_VRAM_MB") ? "RX_VK_VRAM_MB" : known && allowed >= big_card ? "60% of what the driver allows" : "as upstream");
+    }
     const bool preset_budget = opts.vram_mb > 0 && preset_caps_memory();   // (a smaller preset on a bigger card: the card's own)
     uint64_t budget = preset_budget ? ((uint64_t)opts.vram_mb << 20) : own;
     if (preset_budget && known) {
