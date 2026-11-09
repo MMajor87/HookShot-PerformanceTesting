@@ -45,9 +45,9 @@ This repository works on that **renderer**, with two goals:
 - **Windows**, which is the only platform built and tested here. Linux is untouched and untested in this branch: use
   the official releases there.
 
-What it ships is a **drop-in `hookshot_vk.dll`** for a game folder made by the official Hookshot Builder. The renderer
-contains no game code, so it can be shared. The game executable can't be, because it is built on each PC from that
-player's own copy. Each release names the game version it is for. Currently that is **Hookshot v2.0.5**.
+Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
+**drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.5**.
 
 ### What it changes
 
@@ -60,7 +60,7 @@ Based on official Hookshot **v2.0.5**:
 | **Texture descriptor reuse** | When a draw uses the same shader and the same textures as the previous draw, its texture setup is copied instead of rebuilt. | on; `RX_VK_TEX_REUSE=0` = off |
 | **Write collection** | The CPU-write tracking checks its pages under one lock. A small saving. | on; `RX_VK_COLLECT_BATCH=0` = off |
 | **Plant textures** | Upstream pull request [#761](https://github.com/NotRexed/Hookshot/pull/761) merged: compute shaders prepared before the game find their storage buffer table. Fixes most of the flat, white or green near-plant textures ([#763](https://github.com/NotRexed/Hookshot/issues/763), [#811](https://github.com/NotRexed/Hookshot/issues/811)). | always on |
-| **Updates for the renderer** | At start, the renderer checks this repository's releases and offers newer builds for the same game version. See [Updates](#updates). | on; `RX_VK_UPDATE_CHECK=0` = off |
+| **Builder and updates from this repository** | The Builder's setup, the Builder's own update and the game's update check all use this repository, and every Builder part is mirrored in its `builder-parts` release. New renderer builds install themselves in seconds; a new game version is a full rebuild. See [Updates](#updates). | on; `RX_VK_UPDATE_CHECK=0` = off |
 | **F9 frame capture** | The capture writes its own `frame_log.txt` and a draw-stats report, and `RX_VK_DEEP` adds deeper captures for chosen shaders. See [Reporting a problem](#reporting-a-problem). | off until set |
 
 The sampler cache was also sent upstream as pull request [#901](https://github.com/NotRexed/Hookshot/pull/901), and the
@@ -82,23 +82,47 @@ busy areas. Your numbers will depend on your hardware; reports from other setups
 
 ## Install
 
-You need a working game folder made by the **official Hookshot Builder at the version the release names** (see the
-official [Install and play](https://github.com/NotRexed/Hookshot#install-and-play) guide), on 64-bit Windows 10 or 11
-with a Vulkan 1.3 graphics card that has mesh shaders.
+You need 64-bit Windows 10 or 11, a Vulkan 1.3 graphics card with mesh shaders, and **your own copy of the game at the
+supported version** (program `0400486024DEC000`, update v131072, as a `.nup` file or `romfs` and `exefs` folders). The
+official [What you need](https://github.com/NotRexed/Hookshot#what-you-need) list has the details; it all applies here.
+
+### New game folder (recommended)
+
+1. Download **`HookshotBuilder.exe`** from the [latest release](../../releases/latest) and run it. It downloads the rest
+   of the Builder (about 470 MB) from this repository, checks every part, and opens it.
+2. Pick your game, choose where to install, and press **Build the game**. It takes about 10 to 45 minutes, depending on
+   your CPU and memory.
+3. Open `hookshot_env.txt` in the game folder, next to `hookshot.exe` (create it if it isn't there), and copy in the
+   settings you want from the release's `hookshot_env.sample.txt`. At least `RX_VK_WB_MAX_KB=1024`: that is the biggest
+   gain.
+4. Press **Play**. The first start prepares the shaders, which takes a while; later starts are faster.
+
+This folder then follows this repository: new renderer builds and new game versions are offered from here.
+
+### Renderer only, in an official game folder
+
+If you already have a folder made by the **official** Builder at the version the release names:
 
 1. Download `hookshot_vk.dll` and `hookshot_env.sample.txt` from the [latest release](../../releases/latest).
-2. In your game folder's `bin\` folder, rename `hookshot_vk.dll` to `hookshot_vk.dll.official`. That is your way back.
-3. Put the downloaded `hookshot_vk.dll` into `bin\`.
-4. Open `hookshot_env.txt` in the game folder, next to `hookshot.exe` (create it if it isn't there), and copy in the
-   settings you want from `hookshot_env.sample.txt`. At least `RX_VK_WB_MAX_KB=1024`: that is the biggest gain.
-5. Start the game. The first start prepares the shaders again, which takes about a minute. This renderer translates
-   shaders a little differently from the official one.
+2. In the game folder's `bin\` folder, rename `hookshot_vk.dll` to `hookshot_vk.dll.official`. That is your way back.
+3. Put the downloaded `hookshot_vk.dll` into `bin\`, and copy the settings you want into `hookshot_env.txt` as above.
+4. Start the game. The first start prepares the shaders again (about a minute): this renderer translates them a little
+   differently from the official one.
 
-To undo, put `hookshot_vk.dll.official` back as `hookshot_vk.dll`.
+To undo, put `hookshot_vk.dll.official` back as `hookshot_vk.dll`. The renderer updates itself in such a folder too, but
+the official launcher's own update offer still comes from the official project (see below).
 
 ## Updates
 
-**This renderer updates itself.** At each start it asks this repository for its latest release. When there is a newer
+There are two kinds of update, and each is asked about once:
+
+- **A new renderer build for the same game version** (`v2.0.5-perf.3` to `perf.4`): the renderer replaces itself in a
+  few seconds, described below.
+- **A new game version** (for example a future v2.0.6): a full rebuild of the game folder by the Builder, as with the
+  official project. In a folder made by this repository's Builder, the game's launcher and the Builder offer it from
+  this repository.
+
+**The renderer updates itself.** At each start it asks this repository for its latest release. When there is a newer
 build **for the same game version**, it asks you:
 
 - **Yes:** it downloads the new `hookshot_vk.dll`, checks it against the release's `hookshot_vk.dll.sha256`, and uses it
@@ -109,12 +133,15 @@ build **for the same game version**, it asks you:
 It only ever replaces the renderer, never the game, and never offers a build made for a different game version.
 `RX_VK_UPDATE_CHECK=0` turns it off.
 
-**The official launcher's update** is separate. It rebuilds the whole game folder from a new official release and puts
-the official renderer back. When that happens, this renderer won't be offered for the new game version until there is a
-matching release here. If you'd rather not be asked by the official launcher, set `HOOKSHOT_NO_UPDATE_CHECK=1`.
+**In a folder made by the official Builder,** the launcher's update offer still comes from the official project. It
+rebuilds the whole folder from a new official release and puts the official renderer back; this renderer then won't be
+offered for the new game version until there is a matching release here. Set `HOOKSHOT_NO_UPDATE_CHECK=1` to stop that
+offer, or rebuild the folder with this repository's Builder.
 
-Releases are named `<game version>-perf.<n>`, for example `v2.0.5-perf.2`. The updater arrived in `perf.2`, so a copy of
-`perf.1` has to be replaced by hand once.
+Releases are named `<game version>-perf.<n>`, for example `v2.0.5-perf.3`. Each one holds the Builder's setup
+(`HookshotBuilder.exe`) and its `hookshot-setup.txt`, the renderer with its `.sha256`, and `hookshot_env.sample.txt`.
+The Builder's larger parts (its .NET runtime, Python, the compiler and so on) live in the `builder-parts` pre-release.
+The renderer's updater arrived in `perf.2`, so a copy of `perf.1` has to be replaced by hand once.
 
 ## Settings
 
