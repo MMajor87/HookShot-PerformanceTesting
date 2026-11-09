@@ -13,8 +13,16 @@
 #include <string.h>
 
 #define UPDATE_HOST L"api.github.com"
-#define UPDATE_PATH L"/repos/NotRexed/Hookshot/releases/latest"
-#define RELEASES_PAGE L"https://github.com/NotRexed/Hookshot/releases/latest"
+#define UPDATE_PATH L"/repos/MMajor87/HookShot-PerformanceTesting/releases/latest"
+#define RELEASES_PAGE L"https://github.com/MMajor87/HookShot-PerformanceTesting/releases/latest"
+
+/* (HookShot-PerformanceTesting) releases are "<game version>-perf.<n>": a newer perf build of the same game version updates only the
+   renderer (gpu/vk/vk_update.cpp does that in seconds), so the full rebuild is offered only when the game version itself changes */
+static int same_game(const char *a, const char *b) {
+    const char *pa = strstr(a, "-perf."), *pb = strstr(b, "-perf.");
+    const size_t la = pa ? (size_t)(pa - a) : strlen(a), lb = pb ? (size_t)(pb - b) : strlen(b);
+    return la == lb && !strncmp(a, b, la);
+}
 
 /* (a line "name=value" of a small text file, in UTF-8: its value, trimmed) */
 static int read_value(const wchar_t *path, const char *name, char *out, size_t cap) {
@@ -97,6 +105,10 @@ void hos_update_check(void) {
     }
     fprintf(stderr, "update: this folder is %s, the latest release is %s\n", have, tag);
     if (!strcmp(tag, have) || !strcmp(tag, skipped)) return;
+    if (same_game(tag, have)) {   /* (Windows: the renderer's own update covers it) */
+        fprintf(stderr, "update: %s is the same game version: the renderer updates itself\n", tag);
+        return;
+    }
 
     wchar_t wtag[128], whave[128], wbuilder[MAX_PATH], text[2048];
     MultiByteToWideChar(CP_UTF8, 0, tag, -1, wtag, 128);
@@ -215,10 +227,10 @@ static int pipe_tag(const char *cmd, char *tag, size_t cap) {
 static int latest_tag(char *tag, size_t cap) {
     if (pipe_tag("curl -fsSL --max-time 4 --retry 2 -A Hookshot-update-check "
                  "-H \"Accept: application/vnd.github+json\" "
-                 "https://api.github.com/repos/NotRexed/Hookshot/releases/latest 2>/dev/null", tag, cap))
+                 "https://api.github.com/repos/MMajor87/HookShot-PerformanceTesting/releases/latest 2>/dev/null", tag, cap))
         return 1;
     return pipe_tag("curl -fsSL --max-time 8 --retry 2 -A Hookshot-update-check "
-                    "https://github.com/NotRexed/Hookshot/releases/latest/download/hookshot-linux.txt 2>/dev/null", tag, cap);
+                    "https://github.com/MMajor87/HookShot-PerformanceTesting/releases/latest/download/hookshot-linux.txt 2>/dev/null", tag, cap);
 }
 
 /* the builder an update installed (builder/linux/linux_update.py): <data>/hookshot/builder/versions/<current>/AppRun. The
@@ -290,7 +302,7 @@ void hos_update_check(void) {
     if (strncmp(answer, "Update", 6)) return;
     if (!has_builder) {
         if (fork() == 0) {
-            execlp("xdg-open", "xdg-open", "https://github.com/NotRexed/Hookshot/releases/latest", (char *)0);
+            execlp("xdg-open", "xdg-open", "https://github.com/MMajor87/HookShot-PerformanceTesting/releases/latest", (char *)0);
             _exit(127);
         }
         return;

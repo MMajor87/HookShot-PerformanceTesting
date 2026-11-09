@@ -21,7 +21,7 @@ namespace {
 
 // The release this DLL is: <game version>-perf.<n>. Bump kPerfBuild for each release (scripts: Hookshot-backups\release.sh)
 #ifndef PERF_BUILD_NUMBER
-#define PERF_BUILD_NUMBER 2
+#define PERF_BUILD_NUMBER 3
 #endif
 constexpr const char* kGameVersion = "v2.0.5";
 constexpr int kPerfBuild = PERF_BUILD_NUMBER;   // (a test build overrides it: -DPERF_BUILD_NUMBER=0)
@@ -173,7 +173,10 @@ void perf_update_check() {
     std::wstring game = dll.substr(0, dll.find_last_of(L"\\/"));
     if (!game.empty() && GetFileAttributesW((game + L"\\hookshot_version.txt").c_str()) == INVALID_FILE_ATTRIBUTES)
         game = game.substr(0, game.find_last_of(L"\\/"));   // (bin\ -> the game folder)
-    const std::string have_game = read_value(game + L"\\hookshot_version.txt", "version");
+    // (a folder from the official builder says "v2.0.5", one from this repository's builder "v2.0.5-perf.<n>": the game version is
+    // the part before "-perf.")
+    std::string have_game = read_value(game + L"\\hookshot_version.txt", "version");
+    if (const size_t p = have_game.find("-perf."); p != std::string::npos) have_game.resize(p);
     const std::string mine = this_tag();
     if (have_game != kGameVersion) {
         logf("vk: update: this renderer is %s (for Hookshot %s), the game folder is %s: no update check", mine.c_str(), kGameVersion,
