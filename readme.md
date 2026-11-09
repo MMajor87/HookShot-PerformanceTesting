@@ -30,7 +30,7 @@
 > project, go to **[NotRexed/Hookshot](https://github.com/NotRexed/Hookshot)**.
 >
 > Like the official project, this repository **does not contain the game, keys or an executable**. You need your own
-> copy of the game, built into a game folder by the official Hookshot Builder. Never share the files that build creates
+> copy of the game, built into a game folder by the Hookshot Builder (this repository's or the official one). Never share the files that build creates
 > (`hookshot.exe`, the generated code, the shader caches or your saves).
 
 ## What this is
