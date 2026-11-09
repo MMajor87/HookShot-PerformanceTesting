@@ -5602,6 +5602,13 @@ bool taau_key(uint64_t key) {
     static const char* keys = getenv("RX_VK_TAAU_KEYS") ? getenv("RX_VK_TAAU_KEYS")
                               : Shader::Backend::SPIRV::mma_software || getenv("RX_VK_NO_F16")
                                     ? "fd029a317a9a4b94" : "-";   // (RX_VK_NO_F16: vk_shader.cpp leaves the network out)
+    // (HookShot-PerformanceTesting, 2026-11-09) "-" (no stand-in, the default with hardware multiplies) answers no at once,
+    // and the last key's answer is kept: it was an snprintf and a compare at every dispatch)
+    static const bool none = !strcmp(keys, "-");
+    if (none) return false;
+    thread_local uint64_t last_key = 0;
+    thread_local bool last_match = false;
+    if (key == last_key && key) return last_match;
     char hex[24];
     snprintf(hex, sizeof hex, "%016llx", (unsigned long long)key);
     bool match = false;
@@ -5611,6 +5618,7 @@ bool taau_key(uint64_t key) {
         match = e > q && *q != '-' && !strncmp(hex, q, (size_t)(e - q));
         q = *e ? e + 1 : e;
     }
+    last_key = key, last_match = match;
     return match;
 }
 static bool typed_upscale(VkCommandBuffer cmd, VkImageView input_view, VkImageView output_view,
@@ -5733,7 +5741,8 @@ static bool typed_upscale(VkCommandBuffer cmd, VkImageView input_view, VkImageVi
     return true;
 }
 bool taau_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
-    const char* keys = getenv("RX_VK_TAAU_KEYS") ? getenv("RX_VK_TAAU_KEYS") : "fd029a317a9a4b94";
+    // (HookShot-PerformanceTesting: read once. Two getenv calls at every dispatch were ~1.8% of the replay thread in Castle Town)
+    static const char* keys = getenv("RX_VK_TAAU_KEYS") ? getenv("RX_VK_TAAU_KEYS") : "fd029a317a9a4b94";
     if (!taau_key(p.key) || !dev.push_descriptor || !vkCmdPushDescriptorSetKHR || p.stages.empty()) return false;
     const Stage& st = p.stages[0];
     if (st.info.texture_descriptors.empty() || st.info.image_descriptors.empty()) return false;

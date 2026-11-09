@@ -344,14 +344,60 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     } report{t0, t1, t2, t3, t4};
     // (pages the game has not touched yet may be only reserved: committed now, as the pool's memory is usable; a range
     // committed already is left alone: the call took milliseconds in the game's huge reservation)
-    {
+    // (HookShot-PerformanceTesting, 2026-11-09) committed ranges already seen: the walk's VirtualQuery took ~25 ms for a single
+    // region, the game's memory being one committed region of gigabytes whose end Windows finds by scanning its page tables.
+    // In Hyrule Castle Town that was every on-demand import, ~60 ms hitches at ~3 a run. What a query says is committed (the
+    // whole region, far beyond the chunk) is remembered, and an import inside it skips the walk. If the driver then refuses
+    // the import (memory decommitted since), the ranges are forgotten and the walk runs again. RX_VK_COMMIT_CACHE=0: off
+    static const bool commit_cache_on = !(getenv("RX_VK_COMMIT_CACHE") && atoi(getenv("RX_VK_COMMIT_CACHE")) == 0);
+    static std::mutex commit_mu;
+    static std::map<uintptr_t, uintptr_t> commit_known;   // (start -> end, disjoint)
+    auto known_committed = [&](uintptr_t a, uintptr_t b) {
+        std::lock_guard lk(commit_mu);
+        auto it = commit_known.upper_bound(a);
+        if (it == commit_known.begin()) return false;
+        --it;
+        return it->first <= a && it->second >= b;
+    };
+    auto remember_committed = [&](uintptr_t a, uintptr_t b) {
+        std::lock_guard lk(commit_mu);
+        if (commit_known.size() > 4096) commit_known.clear();
+        auto it = commit_known.upper_bound(a);
+        if (it != commit_known.begin() && std::prev(it)->second >= a) --it;   // (merged with the ranges it touches)
+        while (it != commit_known.end() && it->first <= b) {
+            a = std::min(a, it->first), b = std::max(b, it->second);
+            it = commit_known.erase(it);
+        }
+        commit_known[a] = b;
+    };
+    bool walk_skipped = false;
+retry_walk:
+    if (commit_cache_on && !walk_skipped && known_committed((uintptr_t)ptr, (uintptr_t)(ptr + bytes))) {
+        walk_skipped = true;
+        static int64_t skipped;
+        if (++skipped % 64 == 1) logf("vk: import commit walks skipped (known committed): %lld", (long long)skipped);
+    } else {
+        walk_skipped = false;
+        // (HookShot-PerformanceTesting, 2026-11-09) how long the walk takes and how many regions it visits: Hyrule Castle
+        // Town's 60 ms hitches were this loop, the replay thread in NtQueryVirtualMemory (RX_VK_HITCH_STACKS)
+        const auto w0 = clk::now();
+        int regions = 0, committed_now = 0;
         for (uint8_t* q = ptr; q < ptr + bytes;) {
             MEMORY_BASIC_INFORMATION mi{};
             if (VirtualQuery(q, &mi, sizeof mi) != sizeof mi) break;
+            regions++;
             uint8_t* end = std::min((uint8_t*)mi.BaseAddress + mi.RegionSize, ptr + bytes);
-            if (mi.State == MEM_RESERVE) VirtualAlloc(q, (size_t)(end - q), MEM_COMMIT, PAGE_READWRITE);
+            if (mi.State == MEM_RESERVE && VirtualAlloc(q, (size_t)(end - q), MEM_COMMIT, PAGE_READWRITE))
+                committed_now++, remember_committed((uintptr_t)q, (uintptr_t)end);
+            else if (mi.State == MEM_COMMIT && commit_cache_on)   // (the whole region, past the chunk too)
+                remember_committed((uintptr_t)mi.BaseAddress, (uintptr_t)mi.BaseAddress + mi.RegionSize);
             q = end;
         }
+        const double walk_ms = std::chrono::duration<double, std::milli>(clk::now() - w0).count();
+        static int walk_logged;
+        if (walk_ms >= 2.0 && walk_logged++ < 100)
+            logf("vk: import %#llx+%#llx: commit walk %.1f ms, %d regions, %d committed now", (unsigned long long)lo,
+                 (unsigned long long)bytes, walk_ms, regions, committed_now);
     }
 #ifdef __linux__
     if (import_dma_buf(lo, hi, p)) {
@@ -405,6 +451,16 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
         import_result = allocated;
         vkDestroyBuffer(dev.device, p.buffer, nullptr);
         p.buffer = VK_NULL_HANDLE;
+        if (walk_skipped) {   // (above: the remembered ranges may be stale; forgotten, and the walk runs)
+            {
+                std::lock_guard lk(commit_mu);
+                commit_known.clear();
+            }
+            logf("vk: import %#llx+%#llx refused after a skipped commit walk (VkResult %d): walking it", (unsigned long long)lo,
+                 (unsigned long long)bytes, (int)allocated);
+            import_result = VK_SUCCESS;
+            goto retry_walk;
+        }
         import_remember_failure(lo, hi);
         return false;
     }
@@ -1917,10 +1973,18 @@ void cpu_words_merge() {   // (holding cpu_words_mu)
     if (cpu_words_new.empty()) return;
     std::sort(cpu_words_new.begin(), cpu_words_new.end());
     cpu_words_new.erase(std::unique(cpu_words_new.begin(), cpu_words_new.end()), cpu_words_new.end());
-    const size_t mid = cpu_words.size();
-    cpu_words.insert(cpu_words.end(), cpu_words_new.begin(), cpu_words_new.end());
-    std::inplace_merge(cpu_words.begin(), cpu_words.begin() + (ptrdiff_t)mid, cpu_words.end());
-    cpu_words.erase(std::unique(cpu_words.begin(), cpu_words.end()), cpu_words.end());
+    // (HookShot-PerformanceTesting, 2026-11-09) the words already known left out first: the game reports into the same words
+    // every frame, so most merges had nothing new, yet merged (and allocated for) the whole list, up to 65536 words, several
+    // times a frame: ~4% of the replay thread in Castle Town. Merged only when something is new; both are sorted and disjoint
+    size_t kept = 0;
+    for (uint64_t w : cpu_words_new)
+        if (!std::binary_search(cpu_words.begin(), cpu_words.end(), w)) cpu_words_new[kept++] = w;
+    cpu_words_new.resize(kept);
+    if (!cpu_words_new.empty()) {
+        const size_t mid = cpu_words.size();
+        cpu_words.insert(cpu_words.end(), cpu_words_new.begin(), cpu_words_new.end());
+        std::inplace_merge(cpu_words.begin(), cpu_words.begin() + (ptrdiff_t)mid, cpu_words.end());
+    }
     cpu_words_new.clear();
 }
 } // namespace

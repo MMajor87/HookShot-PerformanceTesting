@@ -282,5 +282,7 @@ struct ProfScope {
     explicit ProfScope(int p) : phase(p), t0(prof_now()) {}
     ~ProfScope() { prof_ns[phase] += prof_now() - t0; }
 };
+void hitch_begin(const char* what);   // (vk_hitch.cpp: RX_VK_HITCH_STACKS, a slow recording's call stacks)
+void hitch_end();
 } // namespace mkwvk
 #define PROF(phase) ::mkwvk::ProfScope prof_scope_##phase(::mkwvk::phase)
