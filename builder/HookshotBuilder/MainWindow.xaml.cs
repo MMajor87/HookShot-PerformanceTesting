@@ -146,7 +146,7 @@ public partial class MainWindow : Window
         var builder = Tools.Find()?.Version;
         // (the newest release known: GitHub's, else this builder's own. v2.0.0 took a GitHub that did not answer for "up to date")
         updateTarget = latestTag ?? builder;
-        if (game != null && updateTarget != null && game != updateTarget && !sourcePicked) mode = Mode.UpdateGame;
+        if (game != null && updateTarget != null && !Updater.SameGame(game, updateTarget) && !sourcePicked) mode = Mode.UpdateGame;
         else if (game != null && !sourcePicked) mode = Mode.UpToDate;
         else if (latestTag != null && builder != null && builder != latestTag) mode = Mode.UpdateBuilder;
         else mode = Mode.Build;
@@ -202,15 +202,17 @@ public partial class MainWindow : Window
         latestTag = Environment.GetEnvironmentVariable("HOOKSHOT_LATEST_TAG") is { Length: > 0 } fake ? (fake == "none" ? null : fake) : await Updater.LatestTag();
         updateTarget = latestTag ?? Tools.Find()?.Version;   // (GitHub's newest, else this builder's own)
         if (updateTarget == null) LaunchStatus.Text = "Could not check for updates (GitHub did not answer)";
-        else if (game != null && game != updateTarget && GameVersion(folder) != null)
+        else if (game != null && !Updater.SameGame(game, updateTarget) && GameVersion(folder) != null)
         {
             LaunchStatus.Text = $"Update available: {updateTarget}";
             LaunchStatus.Foreground = new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xFF));
             LaunchStatus.FontWeight = FontWeights.SemiBold;
             LaunchUpdate.Visibility = Visibility.Visible;
         }
-        else if (game != null && game != updateTarget)
+        else if (game != null && !Updater.SameGame(game, updateTarget))
             LaunchStatus.Text = $"{updateTarget} is out: build this folder again with the Hookshot Builder to get it";
+        else if (game != null && game != updateTarget)   // (a newer perf build of this game version: the renderer installs it at start)
+            LaunchStatus.Text = $"Up to date ({updateTarget}'s renderer installs itself when the game starts)";
         else LaunchStatus.Text = latestTag == null ? "Up to date with this builder (GitHub did not answer)" : "Up to date";
     }
 

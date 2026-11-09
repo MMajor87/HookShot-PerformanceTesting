@@ -34,6 +34,16 @@ static class Updater
         UpdateFolder(w, folder, tag, fetched);
     }
 
+    /// (HookShot-PerformanceTesting) releases are "<game version>-perf.<n>". A newer perf build of the same game version is the
+    /// renderer's own update (gpu/vk/vk_update.cpp, in seconds at game start), so the folder counts as up to date here; a
+    /// rebuild is offered only when the game version itself changes (as host/hos_update.c does)
+    public static bool SameGame(string? a, string? b)
+    {
+        if (a == null || b == null) return a == b;
+        static string Game(string t) { var p = t.IndexOf("-perf.", StringComparison.Ordinal); return p < 0 ? t : t[..p]; }
+        return Game(a) == Game(b);
+    }
+
     /// The latest release's tag, quietly (null: GitHub did not answer); a few tries, 20 s at most
     public static async Task<string?> LatestTag()
     {
