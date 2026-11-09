@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <direct.h>
+#include <ctime>
 
 #include "vk_dump.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
@@ -237,6 +238,44 @@ bool dump_on() {
     return armed;
 }
 
+// (local, 2026-11-08) Each dump's own log: <dump folder>/frame_log.txt gets the settings and every "dump" / "draw stats" line
+// logged from the arming until the next dump (the capture's draws, dispatches, bindings, buffers, written files)
+FILE* frame_log = nullptr;
+void frame_log_open(int64_t presents) {
+    if (frame_log) fclose(frame_log), frame_log = nullptr;
+    frame_log = fopen((dir + "/frame_log.txt").c_str(), "w");
+    if (!frame_log) return;
+    const std::time_t now = std::time(nullptr);
+    char when[64];
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    fprintf(frame_log, "# frame dump after present %lld, %s\n# settings:\n", (long long)presents, when);
+    for (char** e = _environ; e && *e; e++)
+        if (!strncmp(*e, "RX_VK_", 6) || !strncmp(*e, "EDEN_", 5) || !strncmp(*e, "HOS_", 4)) fprintf(frame_log, "#   %s\n", *e);
+    fflush(frame_log);
+}
+void dump_log_line(const char* line) {
+    if (!frame_log || !line) return;
+    if (!strstr(line, "dump") && !strstr(line, "draw stats")) return;
+    fputs(line, frame_log);
+    fputc('\n', frame_log);
+    fflush(frame_log);
+}
+// (local, 2026-11-08) RX_VK_DEEP=<prog>[,...]: the heavy captures for those programs in one setting, as if RX_VK_DUMP_UBO and
+// RX_VK_DUMP_SSBO named them, with RX_VK_DUMP_MESH_ARGS_BYTES / RX_VK_DUMP_BUF_MAX at 0x230040 (each left as set when set)
+void deep_capture_settings() {
+    static bool done;
+    if (done) return;
+    done = true;
+    const char* deep = getenv("RX_VK_DEEP");
+    if (!deep || !*deep) return;
+    const std::string list(deep);
+    if (!getenv("RX_VK_DUMP_UBO")) _putenv_s("RX_VK_DUMP_UBO", list.c_str());
+    if (!getenv("RX_VK_DUMP_SSBO")) _putenv_s("RX_VK_DUMP_SSBO", list.c_str());
+    if (!getenv("RX_VK_DUMP_MESH_ARGS_BYTES")) _putenv_s("RX_VK_DUMP_MESH_ARGS_BYTES", "0x230040");
+    if (!getenv("RX_VK_DUMP_BUF_MAX")) _putenv_s("RX_VK_DUMP_BUF_MAX", "0x230040");
+    logf("vk: deep capture on F9 for %s (RX_VK_DEEP)", list.c_str());
+}
+
 int dump_seq() {
     return seq;
 }
@@ -266,7 +305,11 @@ void dump_present(int64_t presents) {
     const char* base = getenv("RX_VK_DUMP_DIR") ? getenv("RX_VK_DUMP_DIR") : getenv("RX_VK_SHOTS");
     dir = std::string(base ? base : ".") + "/dump_" + std::to_string(presents);
     _mkdir(dir.c_str());
+    frame_log_open(presents);
     logf("vk: dumping the frame after present %lld to %s", (long long)presents, dir.c_str());
+    // (local test, 2026-11-08: with RX_VK_DRAW_STATS set, a dump also asks for the draw-stats report, misses included)
+    if (const char* sd = getenv("RX_VK_DRAW_STATS"); sd && *sd)
+        if (FILE* t = fopen((std::string(sd) + "\\draw_stats.now").c_str(), "wb")) fclose(t);
 }
 
 void dump_request(int64_t present, int count) {

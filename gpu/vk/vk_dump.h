@@ -10,6 +10,10 @@ namespace mkwvk {
 
 /// The frame being recorded is dumped
 bool dump_on();
+/// (local) the dump's frame_log.txt: lines with "dump" or "draw stats" from the arming on (logf passes every line)
+void dump_log_line(const char* line);
+/// (local) RX_VK_DEEP: the heavy captures' settings for a list of programs (once, before any is read)
+void deep_capture_settings();
 /// The number the next step's dump gets (draws logged before it are in it)
 int dump_seq();
 /// A present (the count so far): arms the dump of the frame after it, or ends the one before
