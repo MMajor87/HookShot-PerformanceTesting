@@ -3638,10 +3638,14 @@ void end_pass(VkCommandBuffer cmd) {
     pass.open = false;
     if (dump_on() && !dump_mesh_indirect.empty()) {
         for (const auto& [key, addr] : dump_mesh_indirect) {
-            const BufferRef r = gpu_buffer_bind(addr, 16, false);
+            // (local test, 2026-11-08: RX_VK_DUMP_MESH_ARGS_BYTES=<n>: that much from the arguments on, the culling's records after them)
+            static const uint64_t nb = getenv("RX_VK_DUMP_MESH_ARGS_BYTES") ? std::max<uint64_t>(16, strtoull(getenv("RX_VK_DUMP_MESH_ARGS_BYTES"), nullptr, 0)) : 16;
+            BufferRef r = gpu_buffer_bind(addr, nb, false);
+            uint64_t got = nb;
+            if (!r.buffer && nb > 16) r = gpu_buffer_bind(addr, 16, false), got = 16;
             char what[80];
             snprintf(what, sizeof what, "mesh indirect prog %016llx at %#llx", (unsigned long long)key, (unsigned long long)addr);
-            if (r.buffer) dump_buffer(cmd, r.buffer, r.offset, 16, what);
+            if (r.buffer) dump_buffer(cmd, r.buffer, r.offset, got, what);
         }
         dump_mesh_indirect.clear();
     }

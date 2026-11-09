@@ -406,7 +406,9 @@ std::vector<BufItem> buf_items;
 
 void dump_buffer(VkCommandBuffer cmd, VkBuffer src, VkDeviceSize off, VkDeviceSize n, const char* what) {
     if (!armed || !src || !n) return;
-    n = std::min<VkDeviceSize>(n, 65536) & ~3ull;
+    // (local test, 2026-11-08: RX_VK_DUMP_BUF_MAX=<bytes> raises the 64 KB cap; a copy over 64 KB is also written raw to the dump's folder)
+    static const VkDeviceSize cap = getenv("RX_VK_DUMP_BUF_MAX") ? std::max<VkDeviceSize>(65536, strtoull(getenv("RX_VK_DUMP_BUF_MAX"), nullptr, 0)) : 65536;
+    n = std::min<VkDeviceSize>(n, cap) & ~3ull;
     if (!n) return;
     BufItem it;
     it.n = n;
@@ -450,6 +452,15 @@ void dump_write() {
         for (size_t i = 0; i < nw && shown < 24 && k < 1100; i++)
             if (w[i]) k += snprintf(line + k, sizeof line - k, " [%zu]=%#x", i, w[i]), shown++;
         logf("%s", line);
+        if (it.n > 65536) {   // (local test: the whole copy, raw)
+            static int nfile;
+            const std::string path = dir + "/buf_" + std::to_string(nfile++) + ".bin";
+            if (FILE* f = fopen(path.c_str(), "wb")) {
+                fwrite(it.map, 1, (size_t)it.n, f);
+                fclose(f);
+                logf("vk: dump buffer %s written to %s", it.what.c_str(), path.c_str());
+            }
+        }
         destroy_buffer(it.buffer, it.alloc);
     }
     buf_items.clear();
