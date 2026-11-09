@@ -609,14 +609,22 @@ void stamp_page(uint64_t p, uint32_t g) {
 
 namespace { void cap_view_bump(); }   // (defined with cap_view_gen below, in this file's anonymous namespace)
 bool capture_owns(uint64_t guest);
+void capture_owns_batch(const uint32_t* pages, int64_t n, std::vector<uint8_t>& owned);
 void memory_collect_written() {
+    // (local test, 2026-11-08: RX_VK_COLLECT_BATCH=0: capture_owns page by page, as before. Every 600 calls: the host's scan
+    // and this loop timed apart, and the pages a call)
+    static const bool batch = !getenv("RX_VK_COLLECT_BATCH") || atoi(getenv("RX_VK_COLLECT_BATCH")) != 0;
+    const auto t0 = std::chrono::steady_clock::now();
     uint32_t* pages = nullptr;
     const int64_t n = host->collect_written(&pages);
+    const auto t1 = std::chrono::steady_clock::now();
     if (n > 0) {
         const uint32_t g = ++gen_now;
+        static thread_local std::vector<uint8_t> owned;
+        if (batch) capture_owns_batch(pages, n, owned);
         for (int64_t i = 0; i < n; i++) {
             const uint64_t guest = (uint64_t)pages[i] << kPageShift;
-            if (capture_owns(guest)) {   // (written after its submit's capture: the next capture takes it, as it is then)
+            if (batch ? owned[(size_t)i] != 0 : capture_owns(guest)) {   // (written after its submit's capture: the next capture takes it, as it is then)
                 uint64_t avail = 0;
                 if (const uint8_t* q = host->gpu_ptr(guest, &avail)) host->mark_written(q, 4096);
                 continue;
@@ -627,6 +635,19 @@ void memory_collect_written() {
         cap_view_bump();
     }
     if (pages) host->free_pages(pages);
+    {
+        static double scan_ms, loop_ms, npages;
+        static int64_t calls;
+        const auto t2 = std::chrono::steady_clock::now();
+        scan_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        loop_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+        npages += (double)std::max<int64_t>(n, 0);
+        if (++calls % 600 == 0) {
+            logf("vk: writes collected, a call (ms): host scan %.3f, pages checked %.3f (%s), %.0f pages", scan_ms / 600,
+                 loop_ms / 600, batch ? "batched" : "page by page", npages / 600);
+            scan_ms = loop_ms = npages = 0;
+        }
+    }
 }
 uint32_t memory_generation() {
     return gen_now;
@@ -1418,6 +1439,22 @@ bool capture_owns(uint64_t guest) {
         return it != v.begin() && guest < std::prev(it)->second;
     };
     return in(cap_ranges) || in(tex_cap_ranges) || in(pool_cap_ranges);
+}
+// (local test, 2026-11-08) capture_owns for a whole collection of pages: the lock taken and the pool ranges refreshed once,
+// not once a page (memory_collect_written, before each submission). owned[i]: pages[i] is a capture's
+void capture_owns_batch(const uint32_t* pages, int64_t n, std::vector<uint8_t>& owned) {
+    owned.assign((size_t)n, 0);
+    if (!capture_on() || !captures_seen.load(std::memory_order_relaxed)) return;
+    std::lock_guard lk(cap_ranges_mu);
+    refresh_pool_ranges_locked();
+    auto in = [](const std::vector<std::pair<uint64_t, uint64_t>>& v, uint64_t guest) {
+        auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(guest, ~uint64_t(0)));
+        return it != v.begin() && guest < std::prev(it)->second;
+    };
+    for (int64_t i = 0; i < n; i++) {
+        const uint64_t guest = (uint64_t)pages[i] << 12;
+        owned[(size_t)i] = in(cap_ranges, guest) || in(tex_cap_ranges, guest) || in(pool_cap_ranges, guest);
+    }
 }
 void memory_recording_value(uint64_t value, uint64_t completed) {
     mem_rec_value = value;
