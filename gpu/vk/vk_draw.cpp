@@ -48,6 +48,7 @@ namespace mkwvk {
 struct PointerEntry { uint64_t addr, size; };
 const PointerEntry* pointer_table(const NvnState& s, int stage);
 uint32_t stage_cbuf_word(const NvnState& s, const Stage& st, uint32_t index, uint32_t offset);   // (vk_shader.cpp)
+uint64_t sampler_registrations_generation();   // (vk_bank.cpp; local test: sampler_for's cache)
 namespace {
 
 // ---- (hookshot) RX_VK_PROF_FINE=1: where a draw's time goes, finer than the frame line's phases, and what each draw does ----
@@ -1272,7 +1273,24 @@ uint32_t aniso_override() {
     return n;
 }
 /// compare: the shader reads depth with a reference (a sampler without one cannot compare)
+VkSampler sampler_make(int id, bool compare);
+// (local test, 2026-11-08: each texture of each draw found its sampler through a lock, a copy of the registration, a hash of
+// it and a map lookup, ~48000 times a frame at 3000 draws. Now a thread's table by id and compare, good while no sampler
+// registration changed (sampler_registrations_generation, bumped only when a registration's contents change).
+// RX_VK_SAMPLER_CACHE=0: off)
 VkSampler sampler_for(int id, bool compare) {
+    static const bool on = !getenv("RX_VK_SAMPLER_CACHE") || atoi(getenv("RX_VK_SAMPLER_CACHE")) != 0;
+    if (!on || id < 0 || id >= 4096) return sampler_make(id, compare);
+    struct Entry { uint64_t gen; VkSampler s; };
+    static thread_local Entry table[2][4096];   // (gen 0: never filled; the generation starts at 1)
+    const uint64_t gen = sampler_registrations_generation();   // (read first: a registration after it makes the next call miss)
+    Entry& e = table[compare ? 1 : 0][id];
+    if (e.gen == gen) return e.s;
+    const VkSampler made = sampler_make(id, compare);
+    e = {gen, made};
+    return made;
+}
+VkSampler sampler_make(int id, bool compare) {
     nvn_samp_par p{};
     if (!sampler_of(id, &p)) p.minf = NVN_MIN_FILTER_LINEAR, p.magf = NVN_MAG_FILTER_LINEAR, p.lod_max = 1000.0f;
     uint64_t key = mix(compare ? 0xC0 : 0xAB, aniso_override());
@@ -1801,6 +1819,40 @@ bool table_track_open(int logged, int seen, int unlimited) {
     return logged < 60 && (unlimited || seen < kTableTrackLooks);
 }
 
+// ---- (local test, 2026-11-08) a stage's sampled textures kept from the last build of the program: build_descriptors ----
+thread_local uint64_t desc_epoch = 1;   // (bumped where last_desc_valid is cleared: a new command buffer, descriptors disturbed)
+struct TexReuse {
+    const Program* prog = nullptr;
+    uint64_t key = 0;
+    const NvnState* state = nullptr;
+    uint64_t epoch = 0, tex_gen = 0, reg = 0, samp = 0, destroy = 0;
+    std::vector<VkDescriptorImageInfo> imgs;
+    std::vector<Texture*> texs;   // (each image's texture when one resolved: its gpu_written is looked at again)
+};
+constexpr size_t kTexReuseStages = 6;
+thread_local TexReuse tex_reuse[kTexReuseStages];
+bool tex_reuse_on() {
+    static const bool on = (!getenv("RX_VK_TEX_REUSE") || atoi(getenv("RX_VK_TEX_REUSE")) != 0) && !getenv("RX_VK_LOG_IMG") &&
+                           !getenv("RX_VK_WATCH_PROG") && !getenv("RX_VK_TRACE_TEX") && !getenv("RX_VK_NO_DESC_REUSE");
+    return on;
+}
+bool tex_reuse_stage_ok(const Shader::Info& info) {   // (every handle from the driver's texture bank: what tex_gen covers)
+    for (const auto& d : info.texture_descriptors) {
+        if (d.handle_program != ~0U || d.cbuf_index != 2) return false;
+        if (d.has_secondary && d.secondary_cbuf_index != 2) return false;
+    }
+    return true;
+}
+void tex_reuse_count(bool hit) {
+    static std::atomic<int64_t> hits{0}, misses{0};
+    const int64_t n = (hit ? hits : misses).fetch_add(1, std::memory_order_relaxed) + 1;
+    const int64_t h = hits.load(std::memory_order_relaxed), m = misses.load(std::memory_order_relaxed);
+    if ((h + m) % 200000 == 0)
+        logf("vk: stage textures kept from the program's last build (RX_VK_TEX_REUSE): %lld kept, %lld made (%.0f%% kept)",
+             (long long)h, (long long)m, 100.0 * (double)h / (double)std::max<int64_t>(1, h + m));
+    (void)n;
+}
+
 void build_descriptors(const NvnState& s, const Program& p) {
     dw.reset();
     draw_sampled.clear();
@@ -2092,6 +2144,41 @@ void build_descriptors(const NvnState& s, const Program& p) {
         };
         texel_views(info.texture_buffer_descriptors, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, false);
         texel_views(info.image_buffer_descriptors, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, true);
+        // (local test, 2026-11-08) A graphics stage's sampled textures as the last build of this program in this recording made
+        // them, when nothing they come from changed: the stage's texture/sampler/image bindings (tex_gen), the texture and
+        // sampler registrations, no texture destroyed. Only stages whose handles all come from the driver's texture bank (c2).
+        // Each texture's gpu_written is looked at again (the hazard list). RX_VK_TEX_REUSE=0: off
+        const size_t stage_idx = (size_t)(&st - p.stages.data());
+        TexReuse* tr = stage_idx < kTexReuseStages ? &tex_reuse[stage_idx] : nullptr;
+        const uint64_t tr_reg = registrations_generation(), tr_samp = sampler_registrations_generation(),
+                       tr_destroy = texture_destroy_generation();
+        const bool tr_eligible = tr && tex_reuse_on() && ns >= 0 && ns <= 4 && !info.texture_descriptors.empty() &&
+                                 !dump_on() && tex_reuse_stage_ok(info);
+        bool tr_hit = false;
+        if (tr_eligible && tr->prog == &p && tr->key == p.key && tr->state == &s && tr->epoch == desc_epoch &&
+            tr->tex_gen == s.tex_gen[ns] && tr->reg == tr_reg && tr->samp == tr_samp && tr->destroy == tr_destroy) {
+            FINE_SCOPE(FT_TEX);
+            size_t at = 0;
+            for (const auto& d : info.texture_descriptors) {
+                VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, d.count);
+                const size_t first = dw.imgs.size();
+                for (uint32_t k = 0; k < d.count; k++, at++) {
+                    dw.imgs.push_back(tr->imgs[at]);
+                    if (Texture* t = tr->texs[at]; t && t->gpu_written) draw_sampled.push_back(t);
+                }
+                w.pImageInfo = &dw.imgs[first];
+                dw.writes.push_back(w);
+            }
+            tex_reuse_count(true);
+            tr_hit = true;
+        }
+        if (tr_eligible && !tr_hit) {
+            tex_reuse_count(false);
+            tr->prog = nullptr;   // (filled below as the textures are made)
+            tr->imgs.clear(), tr->texs.clear();
+        }
+        const size_t tr_first = dw.imgs.size();
+        if (!tr_hit)
         for (const auto& d : info.texture_descriptors) {
             FINE_SCOPE(FT_TEX);
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, d.count);
@@ -2132,11 +2219,20 @@ void build_descriptors(const NvnState& s, const Program& p) {
                                tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->layers : 0, tex ? (void*)tex->image : nullptr,
                                (void*)view, view ? "" : " (dummy)");
                 if (view && tex && tex->gpu_written) draw_sampled.push_back(tex);
+                if (tr_eligible) tr->texs.push_back(view ? tex : nullptr);
                 if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0;
                 dw.imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
             }
             w.pImageInfo = &dw.imgs[first];
             dw.writes.push_back(w);
+        }
+        if (tr_eligible && !tr_hit) {   // (what this build made, for the next draw of the program)
+            tr->imgs.assign(dw.imgs.begin() + (ptrdiff_t)tr_first, dw.imgs.end());
+            if (tr->imgs.size() == tr->texs.size())
+                *tr = TexReuse{&p, p.key, &s, desc_epoch, s.tex_gen[ns], tr_reg, tr_samp, tr_destroy, std::move(tr->imgs),
+                               std::move(tr->texs)};
+            else
+                tr->prog = nullptr;
         }
         for (const auto& d : info.image_descriptors) {
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, d.count);
@@ -3200,6 +3296,7 @@ void clear_color_target(VkCommandBuffer cmd, NvnState& s, int index, const float
     st_masked_clears++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
     last_dyn_valid = false, last_desc_valid = false, last_vb_valid = false, last_pipeline = VK_NULL_HANDLE;
+    desc_epoch++;   // (local test: RX_VK_TEX_REUSE)
     vertex_set.on = false;   // (the next draw binds its vertex streams again, as last_vb_valid above asks)
     descriptors_disturbed();   // (the next draw pushes all its descriptors, not only those that changed)
     const VkViewport v{0, 0, (float)lw, (float)lh, 0.0f, 1.0f};
@@ -3290,6 +3387,7 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
     pass = Pass{};
     work_since_barrier = false;
     last_dyn_valid = false, last_desc_valid = false, last_vb_valid = false, last_pipeline = VK_NULL_HANDLE;
+    desc_epoch++;   // (local test: RX_VK_TEX_REUSE)
     vertex_set.on = false, last_ib.on = false;
     descriptors_disturbed();
     static thread_local uint64_t hits_value = ~0ull;   // (resolved targets last a submission, through its parts: no CPU write is
