@@ -47,12 +47,12 @@ This repository works on that **renderer**, with two goals:
 
 Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
 **drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
-generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.6**.
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.10**.
 
 ### What it changes
 
-Based on official Hookshot **v2.0.6** (which fixes the bright and flat green plant stems, upstream PR
-[#759](https://github.com/NotRexed/Hookshot/pull/759)):
+Based on official Hookshot **v2.0.10** (since `v2.0.10-perf.1`; earlier releases here were based on v2.0.6). See the
+[official release notes](https://github.com/NotRexed/Hookshot/releases) for what changed in the game itself:
 
 | Change | What it does | Setting (`hookshot_env.txt`) |
 |---|---|---|
@@ -133,7 +133,7 @@ There are two kinds of update, and each is asked about once:
 
 - **A new renderer build for the same game version** (`v2.0.6-perf.1` to `perf.2`): the renderer replaces itself in a
   few seconds, described below.
-- **A new game version** (for example a future v2.0.6): a full rebuild of the game folder by the Builder, as with the
+- **A new game version** (for example v2.0.6 to v2.0.10): a full rebuild of the game folder by the Builder, as with the
   official project. In a folder made by this repository's Builder, the game's launcher and the Builder offer it from
   this repository.
 
