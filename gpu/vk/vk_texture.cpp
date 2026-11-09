@@ -179,9 +179,29 @@ std::unordered_map<const Texture*, uint64_t> remade;   // (made again: how many 
 uint64_t evicted_key(uint64_t gpu, uint32_t w, uint32_t h, uint32_t fmt) {
     return gpu ^ ((uint64_t)w << 48) ^ ((uint64_t)h << 32) ^ ((uint64_t)fmt << 20);
 }
-bool remade_log_on() {
+bool remade_lines_on() {
     static const bool on = getenv("RX_VK_LOG_REMADE") && atoi(getenv("RX_VK_LOG_REMADE")) != 0;
     return on;
+}
+// (HookShot-PerformanceTesting, 2026-11-09) RX_VK_LOG_MADE_SUM=1: every 600 presents, the kinds of textures made (size,
+// layers, NVN format), how many were made first for rendering, made again within 600 frames of their eviction, made over
+// storage another image already had, the CPU time making them took, and the same kinds evicted (and of those, drawn over).
+// Hyrule Castle makes 13-25 textures a frame while walking; RX_VK_LOG_REMADE's lines stop at 300
+bool made_sum_on() {
+    static const bool on = getenv("RX_VK_LOG_MADE_SUM") && atoi(getenv("RX_VK_LOG_MADE_SUM")) != 0;
+    return on;
+}
+bool remade_log_on() {   // (the tracking: for the lines or the summary)
+    static const bool on = remade_lines_on() || made_sum_on();
+    return on;
+}
+struct MadeKind {
+    uint64_t made = 0, rendered = 0, remade = 0, beside = 0, ns = 0, bytes = 0, evicted = 0, drawn_over = 0, empty = 0;
+    uint64_t alloc_ns = 0, reused = 0;   // (of ns: the image and its memory; made from a spare image)
+};
+std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, MadeKind> made_kinds;   // (w, h, layers, NVN format; evicted_mu)
+MadeKind& made_kind(const Texture* t) {
+    return made_kinds[{t->width, t->height, t->layers, t->nvn_format}];
 }
 
 struct Dead {
@@ -192,8 +212,47 @@ struct Dead {
     std::vector<VkDeviceMemory> memory;   // (a sparse image's)
     VkBuffer buffer = VK_NULL_HANDLE;     // (the BC3 scratch's output buffer: given back with its image)
     VmaAllocation buffer_alloc = nullptr;
+    uint64_t ci_key = 0;                  // (a texture's image: kept for reuse; below)
 };
 std::deque<Dead> dead;
+
+// (HookShot-PerformanceTesting, 2026-11-09) Images of evicted textures, once the GPU is done with them, are kept a while and
+// given to the next texture made with the same create info (size, format, levels, layers, usage, flags) instead of a new
+// vkCreateImage and allocation. Hyrule Castle makes ~14 render targets a frame (the scene's set at new storage every other
+// frame, its lights' 384 x 384 shadow maps), as many evicted: depth targets took 150-220 us each to make, ~1 ms a frame, the
+// same with them in the image pool (vkCreateImage and binding: 95% of the time making textures took). Up to RX_VK_IMAGE_REUSE_MB
+// (768) kept, each at most 600 presents, counted in the texture budget; depth and stencil images only (destroy_later). The
+// budget's eviction frees ~170 MB of depth targets every 10 frames there, ~6 a frame made: with 256 MB the oldest of a burst
+// were pushed out before they were asked for (40% reused). RX_VK_IMAGE_REUSE=0: off
+struct Spare {
+    uint64_t ci_key, frame, bytes;
+    VkImage image;
+    VmaAllocation allocation;
+};
+std::vector<Spare> spares;
+uint64_t spare_bytes = 0;   // (counted in total_bytes too: the budget's eviction makes room for them like for any texture)
+void spare_sub(uint64_t b) {
+    b = std::min(spare_bytes, b);
+    spare_bytes -= b, total_bytes -= std::min(total_bytes, b);
+}
+uint64_t spares_pushed_out = 0;   // (for the summary: spares freed for newer ones)
+uint64_t made_alloc_ns = 0;   // (create's last: the time its image and memory took, and whether it was a spare)
+bool made_reused = false;
+bool image_reuse_on() {
+    static const bool on = !(getenv("RX_VK_IMAGE_REUSE") && atoi(getenv("RX_VK_IMAGE_REUSE")) == 0);
+    return on;
+}
+uint64_t image_reuse_cap() {
+    static const uint64_t cap = (uint64_t)(getenv("RX_VK_IMAGE_REUSE_MB") ? std::max(0, atoi(getenv("RX_VK_IMAGE_REUSE_MB"))) : 768) << 20;
+    return cap;
+}
+uint64_t ci_hash(const VkImageCreateInfo& ci) {
+    uint64_t h = 1469598103934665603ull;
+    const uint64_t v[] = {ci.flags, (uint64_t)ci.imageType, (uint64_t)ci.format, ci.extent.width, ci.extent.height, ci.extent.depth,
+                          ci.mipLevels, ci.arrayLayers, (uint64_t)ci.samples, ci.usage, (uint64_t)ci.tiling};
+    for (uint64_t x : v) h = (h ^ x) * 1099511628211ull;
+    return h | 1;   // (never 0: 0 is "not reusable")
+}
 
 // ---- the recording's upload command buffer ----
 thread_local VkCommandBuffer up_cmd = VK_NULL_HANDLE;   // (each recording thread's: a parallel replay's segments
@@ -1396,6 +1455,10 @@ void destroy_later(Texture& tex) {
     for (auto& kv : tex.views)
         if (kv.second) d.views.push_back(kv.second);
     d.memory = tex.sparse_chunks;
+    // (only depth and stencil images by default: a colour target is made in 5-7 us, and Hyrule Castle's 1024 x 576 RGBA16F ones,
+    // 1400 per 600 presents at 5 MB each, filled the spares' 256 MB so few depth ones were kept. RX_VK_IMAGE_REUSE=2: every kind)
+    static const bool reuse_all = getenv("RX_VK_IMAGE_REUSE") && atoi(getenv("RX_VK_IMAGE_REUSE")) == 2;
+    d.ci_key = tex.sparse || (!reuse_all && !(tex.aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) ? 0 : tex.ci_key;
     dead.push_back(std::move(d));
     total_bytes -= std::min(total_bytes, tex.bytes + tex.pad);
 }
@@ -1627,7 +1690,24 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
              x.sparse_req.formatProperties.imageGranularity.width, x.sparse_req.formatProperties.imageGranularity.height,
              x.sparse_req.imageMipTailFirstLod, (unsigned long long)(x.sparse_req.imageMipTailSize >> 10),
              x.sparse_req.formatProperties.flags & VK_SPARSE_IMAGE_FORMAT_SINGLE_MIPTAIL_BIT ? ", one for all layers" : " a layer");
-    } else if (!create_image(ci, x.image, x.allocation)) {
+    } else if (const auto t_img = std::chrono::steady_clock::now();
+               [&] {   // (a spare image the same, else a new one: above, Spare)
+                   made_reused = false;
+                   x.ci_key = ci_hash(ci);
+                   if (image_reuse_on())
+                       for (size_t i = spares.size(); i-- > 0;)
+                           if (spares[i].ci_key == x.ci_key) {
+                               x.image = spares[i].image, x.allocation = spares[i].allocation;
+                               spare_sub(spares[i].bytes);
+                               spares[i] = spares.back();
+                               spares.pop_back();
+                               made_reused = true;
+                               break;
+                           }
+                   const bool ok = made_reused || create_image(ci, x.image, x.allocation);
+                   made_alloc_ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_img).count();
+                   return !ok;
+               }()) {
         static int logged;
         if (logged++ < 16)
             logf("vk: image %ux%ux%u x%u levels %u format %d (NVN %#x) not made", x.width, x.height, x.depth, x.layers,
@@ -1709,7 +1789,7 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
             if (ago < 600) {
                 remade[p] = ago;
                 static int told;
-                if (told++ < 300)
+                if (remade_lines_on() && told++ < 300)
                     logf("vk: texture #%u %#llx %ux%u NVN %#x made again %llu frames after it was evicted (%s then)", p->id,
                          (unsigned long long)p->gpu, p->width, p->height, p->nvn_format, (unsigned long long)ago,
                          ev->second.rendered ? "rendered" : "not rendered");
@@ -1823,8 +1903,25 @@ Texture* texture_get(const nvn_tex* t, bool for_sampling) {
     Texture* tex;
     auto it = textures.find(k);
     if (it == textures.end()) {
+        const auto t0 = made_sum_on() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        size_t beside = 0;
+        if (made_sum_on()) {
+            auto [a, e] = by_gpu.equal_range(t->gpu);
+            beside = std::distance(a, e);
+        }
+        made_alloc_ns = 0, made_reused = false;
         tex = create(k, t, fi.format, fi.astc, bw, bh, bpb);
         if (!tex) return nullptr;
+        if (made_sum_on()) {
+            const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            std::lock_guard lk(evicted_mu);
+            MadeKind& m = made_kind(tex);
+            m.made++, m.ns += ns, m.bytes += tex->bytes + tex->pad;
+            m.rendered += !for_sampling;
+            m.beside += beside != 0;
+            m.remade += remade.count(tex);
+            m.alloc_ns += made_alloc_ns, m.reused += made_reused;
+        }
         static const int64_t log_from = getenv("RX_VK_LOG_MADE") ? atoll(getenv("RX_VK_LOG_MADE")) : -1;
         static int made_logged;
         if (log_from >= 0 && (int64_t)frame_no >= log_from && made_logged++ < 300) {
@@ -1949,8 +2046,9 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
             std::lock_guard lk(evicted_mu);
             auto r = remade.find(tex);
             if (r != remade.end()) {
+                if (made_sum_on()) made_kind(tex).empty++;
                 static int told;
-                if (told++ < 300)
+                if (remade_lines_on() && told++ < 300)
                     logf("vk: texture #%u %#llx %ux%u NVN %#x, made again %llu frames after its eviction, sampled EMPTY "
                          "(storage the GPU rendered, not uploaded) at frame %llu", tex->id, (unsigned long long)tex->gpu,
                          tex->width, tex->height, tex->nvn_format, (unsigned long long)r->second,
@@ -2808,6 +2906,37 @@ Texture* texture_for_present(const nvn_tex* t) {
 void texture_frame(uint64_t completed) {
     completed_value = completed;
     frame_no++;
+    if (made_sum_on() && frame_no % 600 == 0) {   // (above: RX_VK_LOG_MADE_SUM)
+        std::lock_guard lk(evicted_mu);
+        std::vector<std::pair<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, MadeKind>> v(made_kinds.begin(), made_kinds.end());
+        MadeKind all;
+        for (const auto& [k, m] : v) {
+            all.made += m.made, all.rendered += m.rendered, all.remade += m.remade, all.beside += m.beside, all.ns += m.ns;
+            all.bytes += m.bytes, all.evicted += m.evicted, all.drawn_over += m.drawn_over, all.empty += m.empty;
+            all.alloc_ns += m.alloc_ns, all.reused += m.reused;
+        }
+        logf("vk: made in 600 presents: %llu textures (%llu MB; %llu first rendered, %llu made again after eviction, %llu over "
+             "another image's storage, %llu sampled empty), %.2f ms making them (%.1f us each; images and memory %.2f ms, %llu reused, "
+             "%zu spare %llu MB, %llu pushed out); evicted %llu (%llu drawn over); %zu live",
+             (unsigned long long)all.made, (unsigned long long)(all.bytes >> 20), (unsigned long long)all.rendered,
+             (unsigned long long)all.remade, (unsigned long long)all.beside, (unsigned long long)all.empty, all.ns / 1e6,
+             all.made ? all.ns / 1e3 / all.made : 0.0, all.alloc_ns / 1e6, (unsigned long long)all.reused, spares.size(),
+             (unsigned long long)(spare_bytes >> 20), (unsigned long long)spares_pushed_out, (unsigned long long)all.evicted, (unsigned long long)all.drawn_over,
+             textures.size());
+        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+            return std::max(a.second.made, a.second.evicted) > std::max(b.second.made, b.second.evicted);
+        });
+        for (size_t i = 0; i < v.size() && i < 16; i++) {
+            const auto& [k, m] = v[i];
+            logf("vk:   %ux%ux%u NVN %#x: made %llu (%llu rendered first, %llu again after eviction, %llu over another image, "
+                 "%llu empty), %.2f ms (images %.2f, %llu reused), %llu KB; evicted %llu (%llu drawn over)", std::get<0>(k), std::get<1>(k), std::get<2>(k),
+                 std::get<3>(k), (unsigned long long)m.made, (unsigned long long)m.rendered, (unsigned long long)m.remade,
+                 (unsigned long long)m.beside, (unsigned long long)m.empty, m.ns / 1e6, m.alloc_ns / 1e6, (unsigned long long)m.reused, (unsigned long long)(m.bytes >> 10),
+                 (unsigned long long)m.evicted, (unsigned long long)m.drawn_over);
+        }
+        made_kinds.clear();
+        spares_pushed_out = 0;
+    }
     {   // (staging arenas the GPU is done with, beyond 256 MB of them, and any over 64 MB: freed. A scene change stages
         // hundreds of MB to over a GB (the course maps, the terrain's ASTC arrays), and that host memory was kept)
         // (hookshot: 64 on a card of 6 GB or less. On one with resizable BAR the arenas are VRAM: VMA puts a host-visible buffer the GPU
@@ -2880,11 +3009,39 @@ void texture_frame(uint64_t completed) {
             continue;
         }
         for (VkImageView v : it->views) vkDestroyImageView(dev.device, v, nullptr);
-        destroy_image(it->image, it->allocation);
+        const uint64_t sz = it->ci_key && image_reuse_on() ? allocation_size(it->allocation) : 0;
+        if (sz && sz <= image_reuse_cap() / 4) {   // (kept: above, Spare)
+            // (over the cap, the oldest spares go for it: the newest are the kinds still being made. Refusing it instead, a
+            // few large depth targets made once kept ~220 of the 256 MB and 9 of 10 of the castle's shadow maps were made anew)
+            while (spare_bytes + sz > image_reuse_cap() && !spares.empty()) {
+                size_t o = 0;
+                for (size_t i = 1; i < spares.size(); i++)
+                    if (spares[i].frame < spares[o].frame) o = i;
+                destroy_image(spares[o].image, spares[o].allocation);
+                spare_sub(spares[o].bytes);
+                spares_pushed_out++;
+                spares[o] = spares.back();
+                spares.pop_back();
+            }
+            spares.push_back({it->ci_key, frame_no, sz, it->image, it->allocation});
+            spare_bytes += sz, total_bytes += sz;
+        } else {
+            destroy_image(it->image, it->allocation);
+        }
         if (it->buffer) destroy_buffer(it->buffer, it->buffer_alloc);
         for (VkDeviceMemory m : it->memory) vkFreeMemory(dev.device, m, nullptr);
         it = dead.erase(it);
     }
+    if (frame_no % 60 == 0)   // (spare images unused for 600 presents: freed)
+        for (size_t i = 0; i < spares.size();)
+            if (frame_no - spares[i].frame > 600) {
+                destroy_image(spares[i].image, spares[i].allocation);
+                spare_sub(spares[i].bytes);
+                spares[i] = spares.back();
+                spares.pop_back();
+            } else {
+                i++;
+            }
     // A budget: RX_VK_VRAM_MB of textures (default 4096), and less when the driver says the process is near what it
     // may have (other programs use the GPU too). The least recently used go first, down to 7/8 of it; nothing the
     // last 8 presents used, nothing recorded work may still read.
@@ -3132,6 +3289,10 @@ void texture_frame(uint64_t completed) {
             if (evicted_at.size() > 20000) evicted_at.clear();   // (a bound: only the recent ones matter)
             evicted_at[evicted_key(tex->gpu, tex->width, tex->height, tex->nvn_format)] = {frame_no, tex->gpu_written};
             remade.erase(tex);
+            if (made_sum_on()) {
+                MadeKind& m = made_kind(tex);
+                m.evicted++, m.drawn_over += overwritten;
+            }
         }
         destroy_later(*tex);
         forget_gpu(tex);
