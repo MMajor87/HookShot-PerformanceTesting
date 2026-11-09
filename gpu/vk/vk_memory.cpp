@@ -1997,6 +1997,22 @@ void transfer_barrier(VkCommandBuffer cmd) {
 
 /// The pages of the pool the CPU wrote since its mirror's sync, copied in (the upload command buffer)
 void mirror_sync(Pool& p) {
+    // (local profiling, 2026-11-09: the CPU time of mirror syncs, which run inside draws' bindings; every 2000 calls)
+    struct SyncTimer {
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        int64_t copies0 = st_sync_copies;
+        ~SyncTimer() {
+            static double ms;
+            static int64_t calls, copies;
+            ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            copies += st_sync_copies - copies0;
+            if (++calls % 2000 == 0) {
+                logf("vk: mirror syncs (CPU): 2000 calls, %.2f ms in all, %.1f us a call, %.1f copies a call", ms, ms * 1000 / 2000,
+                     copies / 2000.0);
+                ms = 0, copies = 0;
+            }
+        }
+    } sync_timer;
     p.synced_epoch = mirror_epoch;
     p.sync_seg = texture_segment();
     mirror_synced.push_back(&p);

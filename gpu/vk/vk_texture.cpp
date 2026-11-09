@@ -3070,8 +3070,17 @@ void texture_frame(uint64_t completed) {
         logf("vk: finalized textures the GPU drew once, kept for being made again: %zu (%llu KB):%s", finalized_kept_n,
              (unsigned long long)(finalized_kept >> 10), n ? line : "");
     }
+    // (HookShot-PerformanceTesting, 2026-11-09) RX_VK_EVICT_MIN_UNUSED_TEX=<frames>: a texture the GPU never drew into (uploaded
+    // or decoded from the game's memory) goes only after that many frames unused; render targets keep RX_VK_EVICT_MIN_UNUSED.
+    // Hyrule Castle at the budget: of 300 textures made again within 10 s of their eviction, 216 were such textures, the median
+    // 54 frames after (a camera sweep brings them back), while ~6 GB of render targets the game makes over and over stayed.
+    // Unset: as min_unused (as before)
+    static const uint64_t min_unused_tex = getenv("RX_VK_EVICT_MIN_UNUSED_TEX")
+                                               ? std::max<uint64_t>(min_unused, (uint64_t)atoi(getenv("RX_VK_EVICT_MIN_UNUSED_TEX")))
+                                               : min_unused;
     for (auto& [last, tex] : order) {
         if ((!sweep && total_bytes <= budget / 8 * 7) || frame_no - last < (sweep ? std::max<uint64_t>(120, min_unused) : min_unused)) break;
+        if (!sweep && !tex->gpu_written && frame_no - last < min_unused_tex) continue;   // (above: kept a while longer)
         if (tex->last_value > completed) continue;
         // (nor what the GPU wrote and the game still has: the image is its only copy, and one made again over that
         // storage started empty or from stale memory: a sky or course texture drawn once, garbage from then on.
