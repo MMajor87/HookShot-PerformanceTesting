@@ -66,6 +66,7 @@ extern thread_local uint32_t g_nvn2_compute_ssbo_count;
 extern thread_local uint32_t g_nvn2_compute_layout_end;
 extern thread_local bool g_nvn2_miss_log_this;
 extern thread_local bool g_all_global_this;
+extern thread_local bool g_gm_port_this;
 }
 namespace mkwvk {
 struct NvnState;
@@ -1331,6 +1332,34 @@ std::array<u32, 3> mesh_registers_of(const Code* task, const Code& mesh) {
                 (std::min(lines, 0x1FFu) << 22)};
 }
 
+// (local test, 2026-11-08) EDEN_NX2_GM_PORT_PROGS=<key prefix>[,...]: those programs' global memory is tracked the port's way
+// (EDEN_NX2_GM_LEGACY=0) while the rest keep the default. #763: the legacy tracking gives some near-foliage colour programs
+// (green stems 89ca750f9852b7ca, white grass d4abbcb4c2140609) other instance data than their depth twins, the port gives
+// those right and the far foliage and the lighting wrong. An EDEN_ variable: in the program cache's stamp, so a change
+// translates the programs again
+struct GmPortScope {
+    explicit GmPortScope(uint64_t key) {
+        static const char* list = getenv("EDEN_NX2_GM_PORT_PROGS");
+        bool on = false;
+        if (list && *list) {
+            char hex[24];
+            snprintf(hex, sizeof hex, "%016llx", (unsigned long long)key);
+            for (const char* q = list; *q;) {
+                const char* e = strchr(q, ',');
+                const size_t len = e ? (size_t)(e - q) : strlen(q);
+                if (len && !strncmp(hex, q, len)) on = true;
+                q = e ? e + 1 : q + len;
+            }
+            if (on) {
+                static std::atomic<int> told{0};
+                if (told++ < 40) logf("vk: program %s: the port's global memory tracking (EDEN_NX2_GM_PORT_PROGS)", hex);
+            }
+        }
+        Shader::Optimization::g_gm_port_this = on;
+    }
+    ~GmPortScope() { Shader::Optimization::g_gm_port_this = false; }
+};
+
 /// The stage whose banks a task / mesh program reads (its control section's stage when it is one of NVN's six)
 int bank_stage(const Code& c) {
     return c.stage >= 0 && c.stage < kNvnStages ? c.stage : 0;   // (NVN2: task 6, mesh 7, with their own bindings)
@@ -1340,6 +1369,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
     ptr_diag_reset();
+    GmPortScope gm_port(p.key);
     {   // (EvilOOT, RX_VK_MISS_LOG_PROG=<key prefix>: the miss log for that program only)
         static const char* only = getenv("RX_VK_MISS_LOG_PROG");
         char hex[24];
@@ -1403,6 +1433,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         if (fsc) {
             Env fenv{s, *fsc, Shader::Stage::Fragment};
             auto fs = translate(fenv, true);
+            dump_ir(p, "fragment", fs->program, fsc->key);   // (local: RX_VK_IR, the mesh program's fragment stage too)
             questions += fenv.texture_questions;
             Shader::RuntimeInfo frt{};
             // (what the mesh program stores, and its per-primitive generics: Eden's MakeRuntimeInfo)

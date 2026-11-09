@@ -47,6 +47,8 @@ thread_local PointerDiag g_pointer_diag{};
 extern thread_local u32 g_nvn2_compute_ssbo_base;
 extern thread_local u32 g_nvn2_compute_ssbo_count;
 extern thread_local bool g_all_global_this;   // (RX_VK_ALL_GLOBAL_PROGS, vk_shader.cpp: no access of this program bound)
+// (local test, 2026-11-08: EDEN_NX2_GM_PORT_PROGS, vk_shader.cpp: this program takes the port's tracking whatever EDEN_NX2_GM_LEGACY says)
+thread_local bool g_gm_port_this{false};
 
 namespace {
 bool PointerDiagOn() {
@@ -76,7 +78,7 @@ bool GmLegacy() {
     // and its lighting wrong (Discord, 11-08; an A/B in Link's house: his face lit with it off, a dark silhouette with it on),
     // and more draws cost fps. EDEN_NX2_GM_LEGACY=0: the port, for testing)
     static const bool on{EnvSwitch("EDEN_NX2_GM_LEGACY", true)};
-    return on;
+    return on && !g_gm_port_this;
 }
 bool GmNative() {
     static const bool on{EnvSwitch("EDEN_NX2_GM_NATIVE", true)};
