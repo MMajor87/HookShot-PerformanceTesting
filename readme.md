@@ -47,11 +47,12 @@ This repository works on that **renderer**, with two goals:
 
 Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
 **drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
-generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.5**.
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.6**.
 
 ### What it changes
 
-Based on official Hookshot **v2.0.5**:
+Based on official Hookshot **v2.0.6** (which fixes the bright and flat green plant stems, upstream PR
+[#759](https://github.com/NotRexed/Hookshot/pull/759)):
 
 | Change | What it does | Setting (`hookshot_env.txt`) |
 |---|---|---|
@@ -60,6 +61,8 @@ Based on official Hookshot **v2.0.5**:
 | **Texture descriptor reuse** | When a draw uses the same shader and the same textures as the previous draw, its texture setup is copied instead of rebuilt. | on; `RX_VK_TEX_REUSE=0` = off |
 | **Write collection** | The CPU-write tracking checks its pages under one lock. A small saving. | on; `RX_VK_COLLECT_BATCH=0` = off |
 | **Plant textures** | Upstream pull request [#761](https://github.com/NotRexed/Hookshot/pull/761) merged: compute shaders prepared before the game find their storage buffer table. Fixes most of the flat, white or green near-plant textures ([#763](https://github.com/NotRexed/Hookshot/issues/763), [#811](https://github.com/NotRexed/Hookshot/issues/811)). | always on |
+| **Texture budget on big cards** | Upstream caps texture memory at 6 GB. In Hyrule Castle that cap made the renderer evict textures and make them again every frame while walking (the renderer at 16-17.6 ms, 40-45 fps on a 16 GB card). Where the driver allows 12 GB or more, the budget is now 60% of that (about 9 GB on a 16 GB card). Smaller cards keep upstream's rule. | on; `RX_VK_VRAM_MB=<MB>` sets it |
+| **Evicting render targets (opt-in)** | Textures the GPU drew into are normally kept a minute after their last use. The castle's ~500 render targets then fill the budget. With this setting they can go after about a second, written back to the game's memory first where possible. Castle while walking: 30-45 to the high 40s-55 fps in testing. | off; `RX_VK_EVICT_RENDERED=1` = on |
 | **Builder and updates from this repository** | The Builder's setup, the Builder's own update and the game's update check all use this repository, and every Builder part is mirrored in its `builder-parts` release. New renderer builds install themselves in seconds; a new game version is a full rebuild. See [Updates](#updates). | on; `RX_VK_UPDATE_CHECK=0` = off |
 | **F9 frame capture** | The capture writes its own `frame_log.txt` and a draw-stats report, and `RX_VK_DEEP` adds deeper captures for chosen shaders. See [Reporting a problem](#reporting-a-problem). | off until set |
 
@@ -116,7 +119,7 @@ the official launcher's own update offer still comes from the official project (
 
 There are two kinds of update, and each is asked about once:
 
-- **A new renderer build for the same game version** (`v2.0.5-perf.3` to `perf.4`): the renderer replaces itself in a
+- **A new renderer build for the same game version** (`v2.0.6-perf.1` to `perf.2`): the renderer replaces itself in a
   few seconds, described below.
 - **A new game version** (for example a future v2.0.6): a full rebuild of the game folder by the Builder, as with the
   official project. In a folder made by this repository's Builder, the game's launcher and the Builder offer it from
@@ -138,7 +141,7 @@ rebuilds the whole folder from a new official release and puts the official rend
 offered for the new game version until there is a matching release here. Set `HOOKSHOT_NO_UPDATE_CHECK=1` to stop that
 offer, or rebuild the folder with this repository's Builder.
 
-Releases are named `<game version>-perf.<n>`, for example `v2.0.5-perf.3`. Each one holds the Builder's setup
+Releases are named `<game version>-perf.<n>`, for example `v2.0.6-perf.1`. Each one holds the Builder's setup
 (`HookshotBuilder.exe`) and its `hookshot-setup.txt`, the renderer with its `.sha256`, and `hookshot_env.sample.txt`.
 The Builder's larger parts (its .NET runtime, Python, the compiler and so on) live in the `builder-parts` pre-release.
 The renderer's updater arrived in `perf.2`, so a copy of `perf.1` has to be replaced by hand once.
@@ -155,6 +158,8 @@ All settings go in `hookshot_env.txt` in the game folder, one `NAME=VALUE` per l
 | `RX_VK_TEX_REUSE=0` | on | Turns texture descriptor reuse off. Try this first if an object shows a clearly wrong texture. |
 | `RX_VK_COLLECT_BATCH=0` | on | Turns the batched write collection off. |
 | `RX_VK_UPDATE_CHECK=0` | on | Turns this renderer's update check off. |
+| `RX_VK_VRAM_MB=<MB>` | 60% of what the driver allows (12 GB+), else upstream's | A fixed texture budget. |
+| `RX_VK_EVICT_RENDERED=1` | off | Lets render targets be evicted after about a second unused. Better fps in Hyrule Castle; remove it if black, garbage or rainbow textures appear. |
 | `HOS_PIN=MainThread=FFFF,Presentation=FFFF,ModuleSystemWorker=FFFF` | off | Intel CPUs with performance and efficiency cores (12th gen and newer, 8 performance cores): keeps the game's busiest threads on the performance cores. A few fps in testing. |
 | `HOOKSHOT_NO_UPDATE_CHECK=1` | off | Stops the official launcher's update offer. |
 
@@ -183,10 +188,9 @@ buffers and textures. Those captures are large.
 
 ## Known issues
 
-- **Flat green stems on some small ground plants**, from certain camera angles and distances. Traced to the plants'
-  culling pass (`102f5b0abb0f1e63`), not fixed yet. It's part of the same family as upstream
-  [#763](https://github.com/NotRexed/Hookshot/issues/763). It was there before these changes, and #761 already removed
-  most of it.
+- **Hyrule Castle** still drops below 60 fps while walking (the high 40s to 55 with `RX_VK_EVICT_RENDERED=1`, 30-45
+  without): the game draws hundreds of render targets there. Being worked on. Upstream lists lower fps in Castle Town and
+  Hyrule Field as a known v2.0.6 issue too.
 - **Texture descriptor reuse** has had limited play time. If an object ever shows a clearly wrong texture, try
   `RX_VK_TEX_REUSE=0`, and please report whether that fixes it.
 - Everything else that is open upstream applies here too, apart from what this branch fixes. See the
