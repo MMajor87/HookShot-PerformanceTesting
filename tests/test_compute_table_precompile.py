@@ -44,12 +44,13 @@ def bank_layout(bank):
     methods = dict(re.findall(r"uint32_t (\w+)\(\) const \{ return ([^;]+); \}", layout))
     for name in ("ubo_at", "ssbo_at", "tex_at", "img_at", "end"):
         assert name in methods, "CsLayout::%s() not found" % name
-    reader = block(bank, "CsLayout cs_layout(const NvnState& s)")
+    # (v2.0.6 reads the control section in cs_layout_of, which cs_layout and the seed both call)
+    reader = block(bank, "CsLayout cs_layout_of(const uint8_t* c)")
     fields = {}
     for field, offset in re.findall(r"l\.(ubo|ssbo|tex|img) = c\[(0x[0-9a-f]+) - 0x58\]", reader):
         fields[field] = int(offset, 16)
     m = re.search(r"l\.push = (.+?);", reader)
-    assert m and len(fields) == 4, "cs_layout no longer reads the counts as this test expects"
+    assert m and len(fields) == 4, "cs_layout_of no longer reads the counts as this test expects"
     push = c_expr(m.group(1))
     push_byte = re.search(r"c\[(0x[0-9a-f]+) - 0x58\]", push)
     assert push_byte, push
