@@ -21,7 +21,7 @@ namespace {
 
 // The release this DLL is: <game version>-perf.<n>. Bump kPerfBuild for each release (scripts: Hookshot-backups\release.sh)
 #ifndef PERF_BUILD_NUMBER
-#define PERF_BUILD_NUMBER 1
+#define PERF_BUILD_NUMBER 2
 #endif
 constexpr const char* kGameVersion = "v2.0.6";
 constexpr int kPerfBuild = PERF_BUILD_NUMBER;   // (a test build overrides it: -DPERF_BUILD_NUMBER=0)
