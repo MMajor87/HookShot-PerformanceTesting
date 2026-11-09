@@ -2303,7 +2303,32 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         return remember({p->buffer, off, size, 0});
     }
     if (p->synced_epoch != mirror_epoch || p->sync_seg > texture_segment()) mirror_sync(*p);
-    if (written) writebacks.push_back({p, off, std::min(off + size, p->hi - p->lo)});
+    if (written) {
+        // (local test, 2026-11-08: RX_VK_WB_MAX_KB=<n>: a written range bigger than n KB is not copied back to guest memory.
+        // The big ones are GPU-only data (the foliage culling's lists, 15-150 MB storage buffers): 26-68 MB a frame, half the
+        // GPU's time at 3500 draws, on the frame's critical path (45 -> 57 fps with no write-back at all). The small ones
+        // stay: the exposure meter and the other results the CPU reads. 0 or unset: all, as before)
+        static const uint64_t wb_max = getenv("RX_VK_WB_MAX_KB") ? strtoull(getenv("RX_VK_WB_MAX_KB"), nullptr, 10) << 10 : 0;
+        const uint64_t hi = std::min(off + size, p->hi - p->lo);
+        if (wb_max && hi - off > wb_max) {
+            static int64_t skipped_b, skipped_n;
+            static int logged;
+            skipped_b += (int64_t)(hi - off), skipped_n++;
+            if (logged < 40) {
+                static std::vector<uint64_t> seen;
+                if (std::find(seen.begin(), seen.end(), p->lo + off) == seen.end()) {
+                    seen.push_back(p->lo + off), logged++;
+                    logf("vk: write-back left out (RX_VK_WB_MAX_KB): %.1f MB at %#llx (pool %#llx)", (hi - off) / 1048576.0,
+                         (unsigned long long)(p->lo + off), (unsigned long long)p->lo);
+                }
+            }
+            if (skipped_n % 20000 == 0)
+                logf("vk: write-back left out (RX_VK_WB_MAX_KB): %lld ranges, %.0f MB so far; %.0f MB written back so far",
+                     (long long)skipped_n, skipped_b / 1048576.0, st_wb_bytes / 1048576.0);
+        } else {
+            writebacks.push_back({p, off, hi});
+        }
+    }
     return remember({p->mirror, off, size, 0});
 }
 
