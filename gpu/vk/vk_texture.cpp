@@ -1932,6 +1932,38 @@ Texture* texture_get(const nvn_tex* t, bool for_sampling) {
                  tex->id, (unsigned long long)tex->gpu, t->d.width, t->d.height, t->d.depth, tex->layers, t->d.levels,
                  t->d.format, t->d.target, t->L.tileH, for_sampling ? "sampled" : "rendered", others);
         }
+        // (HookShot-PerformanceTesting, 2026-11-09) RX_VK_LOG_MADE_KIND=<w>x<h>:<NVN format, hex>[:<from frame>]: every texture
+        // of that kind made (up to 600 lines): its storage (GPU and guest address), the last one's of the kind, and the images
+        // already at that storage. Hyrule Castle makes the scene's set of render targets again every ~1.75 frames: at what storage
+        static const auto want = [] {
+            struct W { uint32_t w = 0, h = 0, fmt = 0; uint64_t from = 0; } x;
+            if (const char* e = getenv("RX_VK_LOG_MADE_KIND")) {
+                unsigned long long f = 0;
+                sscanf(e, "%ux%u:%x:%llu", &x.w, &x.h, &x.fmt, &f);
+                x.from = f;
+            }
+            return x;
+        }();
+        if (want.w && tex->width == want.w && tex->height == want.h && (uint32_t)tex->nvn_format == want.fmt && frame_no >= want.from) {
+            static int n;
+            static uint64_t last_gpu, last_frame;
+            if (n++ < 600) {
+                char others[400];
+                int o = 0;
+                others[0] = 0;
+                auto [a, e] = by_gpu.equal_range(tex->gpu);
+                for (auto it = a; it != e && o < 340; ++it)
+                    if (it->second != tex)
+                        o += snprintf(others + o, sizeof others - o, " #%u %ux%u NVN %#x (used %llu, drawn %llu);", it->second->id,
+                                      it->second->width, it->second->height, it->second->nvn_format,
+                                      (unsigned long long)it->second->last_frame, (unsigned long long)it->second->last_written);
+                logf("vk: made kind: frame %llu #%u gpu %#llx guest %#llx size %llu (%+lld from the last, made %llu frames ago), "
+                     "first %s, layout %#x; at it:%s", (unsigned long long)frame_no, tex->id, (unsigned long long)tex->gpu,
+                     (unsigned long long)tex->guest, (unsigned long long)tex->guest_size, (long long)(tex->gpu - last_gpu),
+                     (unsigned long long)(frame_no - last_frame), for_sampling ? "sampled" : "rendered", k.layout, o ? others : " nothing");
+            }
+            last_gpu = tex->gpu, last_frame = frame_no;
+        }
     } else {
         tex = it->second.get();
     }
@@ -3161,6 +3193,63 @@ void texture_frame(uint64_t completed) {
              verify_dim().second, checked, changed, missed);
     }
     static const bool no_evict = getenv("RX_VK_NO_EVICT") != nullptr;   // (an experiment: nothing evicted)
+    // (HookShot-PerformanceTesting, 2026-11-09) a render target unused for RX_VK_EVICT_OVERLAPPED presents (8 by default; 0:
+    // off) whose storage a newer one has since been drawn over in any part (not only from the same address: drawn_over below)
+    // holds nothing the game has: its memory is the newer one's now. Hyrule Castle makes its scene's render targets in a
+    // per-frame allocator, each frame 40 KB to 1.3 MB further on (a 2048 x 1152 RGBA8 one, 9 MB, made 511 frames of 600, each
+    // over the last few), ~14 render targets a frame, 20 GB per 600 presents: none "drawn over" from the same address, they
+    // waited for the budget's eviction (unused 60 presents, over the budget) or a minute (RX_VK_EVICT_RENDERED unset), ~6 GB of
+    // them, and pushed the textures the scene samples out of the budget
+    static const uint64_t overlapped_after =
+        getenv("RX_VK_EVICT_OVERLAPPED") ? (uint64_t)std::max(0, atoi(getenv("RX_VK_EVICT_OVERLAPPED"))) : 8;
+    if (!no_evict && overlapped_after) {
+        std::vector<Texture*> rt;
+        rt.reserve(textures.size());
+        for (auto& kv : textures)
+            if (kv.second->gpu_written && kv.second->guest_size && !kv.second->sparse) rt.push_back(kv.second.get());
+        std::sort(rt.begin(), rt.end(), [](const Texture* a, const Texture* b) { return a->gpu < b->gpu; });
+        std::unordered_set<Texture*> over;
+        for (size_t i = 0; i < rt.size(); i++) {
+            Texture* a = rt[i];
+            const uint64_t ae = a->gpu + a->guest_size;
+            for (size_t j = i + 1; j < rt.size() && rt[j]->gpu < ae; j++) {
+                Texture* b = rt[j];
+                if (b->last_written > a->last_frame) over.insert(a);
+                else if (a->last_written > b->last_frame) over.insert(b);
+            }
+        }
+        std::unordered_set<Texture*> went;
+        uint64_t went_b = 0;
+        for (Texture* tex : over) {
+            if (frame_no - tex->last_frame < overlapped_after || tex->last_value > completed) continue;
+            watch_tex(tex, "evicted (drawn over in part)");
+            if (remade_log_on()) {
+                std::lock_guard lk(evicted_mu);
+                if (evicted_at.size() > 20000) evicted_at.clear();
+                evicted_at[evicted_key(tex->gpu, tex->width, tex->height, tex->nvn_format)] = {frame_no, tex->gpu_written};
+                remade.erase(tex);
+                if (made_sum_on()) {
+                    MadeKind& m = made_kind(tex);
+                    m.evicted++, m.drawn_over++;
+                }
+            }
+            went_b += tex->bytes + tex->pad;
+            destroy_later(*tex);
+            forget_gpu(tex);
+            went.insert(tex);
+        }
+        if (!went.empty()) {
+            for (auto it = textures.begin(); it != textures.end();)
+                it = went.count(it->second.get()) ? textures.erase(it) : std::next(it);
+            static uint64_t n_went, b_went;
+            n_went += went.size(), b_went += went_b;
+            if (frame_no % 600 == 0)
+                logf("vk: render targets drawn over in part, evicted: %llu (%llu MB) in the last 600 presents; %zu textures left, %llu MB",
+                     (unsigned long long)n_went, (unsigned long long)(b_went >> 20), textures.size(),
+                     (unsigned long long)(total_bytes >> 20)),
+                    n_went = b_went = 0;
+        }
+    }
     // (hookshot) under the budget, every 600 presents: the render targets drawn over since (below), unused for 120
     const bool sweep = total_bytes <= budget;
     if (no_evict || (sweep && frame_no % 600)) return;
