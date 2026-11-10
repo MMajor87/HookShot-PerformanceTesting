@@ -47,11 +47,11 @@ This repository works on that **renderer**, with two goals:
 
 Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
 **drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
-generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.11**.
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.14**.
 
 ### What it changes
 
-Based on official Hookshot **v2.0.11** (since `v2.0.11-perf.1`; earlier releases here were based on v2.0.10 and v2.0.6). See the
+Based on official Hookshot **v2.0.14** (since `v2.0.14-perf.1`; earlier releases here were based on v2.0.11, v2.0.10 and v2.0.6). See the
 [official release notes](https://github.com/NotRexed/Hookshot/releases) for what changed in the game itself:
 
 | Change | What it does | Setting (`hookshot_env.txt`) |
@@ -61,10 +61,10 @@ Based on official Hookshot **v2.0.11** (since `v2.0.11-perf.1`; earlier releases
 | **Texture descriptor reuse** | When a draw uses the same shader and the same textures as the previous draw, its texture setup is copied instead of rebuilt. | on; `RX_VK_TEX_REUSE=0` = off |
 | **Write collection** | The CPU-write tracking checks its pages under one lock. A small saving. Upstream has its own version of this since v2.0.10, so it has no switch any more. | on |
 | **Plant textures** | Upstream pull request [#761](https://github.com/NotRexed/Hookshot/pull/761) merged: compute shaders prepared before the game find their storage buffer table. Fixes most of the flat, white or green near-plant textures ([#763](https://github.com/NotRexed/Hookshot/issues/763), [#811](https://github.com/NotRexed/Hookshot/issues/811)). | always on |
-| **Texture budget on big cards** | Upstream caps texture memory at 6 GB. In Hyrule Castle that cap made the renderer evict textures and make them again every frame while walking (the renderer at 16-17.6 ms, 40-45 fps on a 16 GB card). Where the driver allows 12 GB or more, the budget is now 60% of that (about 9 GB on a 16 GB card). Smaller cards keep upstream's rule. | on; `RX_VK_VRAM_MB=<MB>` sets it |
+| **Texture budget on big cards** | Upstream caps texture memory at 6 GB. In Hyrule Castle that cap made the renderer evict textures and make them again every frame while walking (the renderer at 16-17.6 ms, 40-45 fps on a 16 GB card). Where the driver allows 12 GB or more, the budget is now 60% of that (about 9 GB on a 16 GB card). Smaller cards keep upstream's rule (45% on cards of 8 GB or less since v2.0.14). | on; `RX_VK_VRAM_MB=<MB>` sets it |
 | **Freeing overwritten render targets** | The castle makes its scene's render targets again almost every frame, each a little further along a running block of memory, so each new one overlaps the last few. The renderer only counted a render target as overwritten when a newer one started at exactly the same address, so the old ones piled up (about 6 GB) and pushed the scene's textures out of the budget. A render target that a newer one has drawn over in any part is now freed after 8 frames unused. Castle: render targets 6 GB to about 1 GB, texture lookups 1.5-4 ms to under 1 ms a frame, renderer 15-17 ms to 12-14 ms a frame (with `RX_VK_ASTC_BC_ALL=1`, VRAM 13.8 to 9.8 GB). | on; `RX_VK_EVICT_OVERLAPPED=0` = off |
-| **Depth image reuse** | Making a depth image took 150-360 µs (colour ones 5-7 µs), and the castle makes about 6 a frame: its lights' shadow maps and the scene's depth. Evicted depth images are now kept a while (up to 768 MB, counted in the texture budget) and given to the next texture of the same shape. About half of new images in the castle reuse one. | on; `RX_VK_IMAGE_REUSE=0` = off |
-| **Faster memory imports** | The first time the GPU needs a new 16 MB block of the game's memory, the renderer imports it, first asking Windows whether its pages are committed. The game's memory is one region of several gigabytes, and each answer took about 25 ms, so these imports were the ~60 ms hitches in Castle Town (and when stepping into the fountain, issue #2). What Windows reports as committed is now remembered and not asked again. Worst frame on the castle route: about 60 ms to about 40 ms (what remains is the driver's own import). | on; `RX_VK_COMMIT_CACHE=0` = off |
+| **Depth image reuse** | Upstream has its own render target image pool since v2.0.12 (`RX_VK_TARGET_POOL_MB`, 256 MB), which covers this; ours was dropped in favour of it. | upstream's |
+| **Faster memory imports** | Upstream fixed the same import hitches since v2.0.12 by committing a block's pages in one call instead of asking Windows region by region; ours was dropped in favour of it. | upstream's |
 | **Smaller CPU savings** | A list of game-memory words was merged and sorted several times a frame even when nothing in it had changed (~4% of the renderer thread), and a setting was read from the environment at every compute dispatch. | always on |
 | **Evicting render targets (opt-in)** | Textures the GPU drew into are normally kept a minute after their last use. With this setting they can go after about a second, written back to the game's memory first where possible. It helped the castle before the two changes above; with them it should rarely be needed. | off; `RX_VK_EVICT_RENDERED=1` = on |
 | **Builder and updates from this repository** | The Builder's setup, the Builder's own update and the game's update check all use this repository, and every Builder part is mirrored in its `builder-parts` release. New renderer builds install themselves in seconds; a new game version is a full rebuild. See [Updates](#updates). | on; `RX_VK_UPDATE_CHECK=0` = off |
@@ -171,8 +171,6 @@ All settings go in `hookshot_env.txt` in the game folder, one `NAME=VALUE` per l
 | `RX_VK_UPDATE_CHECK=0` | on | Turns this renderer's update check off. |
 | `RX_VK_VRAM_MB=<MB>` | 60% of what the driver allows (12 GB+), else upstream's | A fixed texture budget. |
 | `RX_VK_EVICT_OVERLAPPED=0` | on (8 frames) | Turns off freeing render targets that a newer one has drawn over. A number sets how many frames unused first. Try `0` if something flickers or shows an old frame. |
-| `RX_VK_COMMIT_CACHE=0` | on | Turns off remembering which game memory is committed (the faster memory imports). |
-| `RX_VK_IMAGE_REUSE=0` | on | Turns off depth image reuse. `RX_VK_IMAGE_REUSE_MB=<MB>` sets how much is kept (768). |
 | `RX_VK_EVICT_RENDERED=1` | off | Lets render targets be evicted after about a second unused. Rarely needed now; remove it if black, garbage or rainbow textures appear. |
 | `RX_VK_ASTC_BC_ALL=1` | off on cards with 6 GB or more | **Recommended.** Keeps the finer compressed textures smaller in VRAM too: in Hyrule Castle 2.5 GB instead of 5.8 GB of the 9 GB budget, so textures stop being evicted and loaded again while walking. No visible difference in testing. |
 | `HOS_PIN=MainThread=FFFF,Presentation=FFFF,ModuleSystemWorker=FFFF` | off | Intel CPUs with performance and efficiency cores (12th gen and newer, 8 performance cores): keeps the game's busiest threads on the performance cores. A few fps in testing. |

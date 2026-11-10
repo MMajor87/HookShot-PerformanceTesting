@@ -51,6 +51,7 @@ cp -a gpu/render/*.h "$T/gpu/render/"
 # tests/test_appimage_headers.py checks that this covers what host/ includes)
 for h in $(grep -rhoE 'gpu/vk/[A-Za-z0-9_]+[.]h' host | sort -u); do if [ -f "$h" ]; then cp -a "$h" "$T/gpu/vk/"; fi; done
 cp -a third_party/opus "$T/third_party/"
+cp -a third_party/kenney_input "$T/third_party/"
 mkdir -p "$T/third_party/zbic" "$T/third_party/a64-kit"
 cp -a third_party/zbic/zbic.so third_party/zbic/LICENSE third_party/zbic/PROVENANCE.md "$T/third_party/zbic/"
 cp -a third_party/a64-kit/* "$T/third_party/a64-kit/"
@@ -111,7 +112,11 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 cp assets/hookshot.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/hookshot.png"
 
 # (the update list, beside AppRun and not inside a hashed part: hookshot-linux.txt names each part's checksum)
-python3 scripts/linux/make_parts.py "$APPDIR" "$VERSION" "$B/parts"
+# (the parts are served from the linux-parts release of the repository this is built in, where
+# scripts/linux/publish_parts.sh uploads them: without --base the list named NotRexed/Hookshot's release, which a fork's
+# CI does not upload to, so a fork's update list named parts that were not there)
+python3 scripts/linux/make_parts.py "$APPDIR" "$VERSION" "$B/parts" \
+    --base "https://github.com/${GITHUB_REPOSITORY:-NotRexed/Hookshot}/releases/download/linux-parts"
 
 OUT=$B/Hookshot-$VERSION-x86_64.AppImage
 rm -f "$OUT"

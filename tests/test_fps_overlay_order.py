@@ -26,12 +26,17 @@ def main():
     p.add_argument("--cxx", default="g++")
     p.add_argument("--source", type=Path, default=ROOT / "gpu/vk/vk_menu.cpp")
     a = p.parse_args()
-    fn = block(a.source.read_text(encoding="utf-8"), "void menu_record(")
-    fixture = r'''#include <atomic>
+    source = a.source.read_text(encoding="utf-8")
+    fn = block(source, "int scale_of(") + "\n" + block(source, "void menu_record(")
+    fixture = r'''#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <mutex>
+#include "vk_menu_hit.h"
+namespace menu_hit = mkwvk::menu_hit;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
 using VkCommandBuffer = int;
 using VkImage = int;
@@ -46,6 +51,7 @@ struct VkDependencyInfo {
     int sType; unsigned memoryBarrierCount = 0; const VkMemoryBarrier2* pMemoryBarriers = nullptr;
 };
 struct { bool show_fps = false; } opts;
+struct { struct { uint32_t height = 720; } swap_extent; } dev;
 struct Bitmap { uint32_t w, h; } fps_bmp{120, 54}, menu_bmp{360, 500}, startup_bmp{600, 150};
 struct Upload {} ups[3][3];
 std::mutex bmp_mu;
@@ -89,7 +95,7 @@ int main() {
         cpp, exe = Path(tmp) / "fixture.cpp", Path(tmp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
         subprocess.run([a.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror",
-                        str(cpp), "-o", str(exe)], check=True)
+                        "-I" + str(ROOT / "gpu/vk"), str(cpp), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
 
 

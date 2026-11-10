@@ -7,18 +7,24 @@ namespace mkwvk::menu_hit {
 // ---- the options page, at a scale of 1 (the window 720 pixels high; 1440 and up: 2, and so on) ----
 constexpr int kWidth = 480;
 constexpr int kTabY = 44, kTabH = 32;     // the tab strip
-constexpr int kTabSide = 85;              // either side of the tab titles: [Q / LB] and [E / RB], the previous and next tab
+constexpr int kTabSide = 64;              // either side of the tab titles: [Q / LB] and [E / RB], the previous and next tab
+                                          // (64, not 85, since the Debug tab: four slots of 88, CONTROLS' pill 86 wide)
 constexpr int kRowGap = 8, kRowH = 28;    // the rows, from kTabY + kTabH + kRowGap
 constexpr int kRowX = 8;                  // a row's band, kRowX in from either side
 constexpr int kValueRight = 18;           // a value ends kValueRight from the right
 constexpr int kSliderL = 200, kSliderR = 330;   // a slider row's track (Sharpness, Mouse sensitivity)
 constexpr int kSliderGrab = 6;            // (a click this far past either end still takes the track's end)
-// ---- the Controls page ----
-constexpr int kCtlWidth = 600, kCtlTop = 64, kCtlRowH = 24, kCtlPad = 200, kCtlKey = 390, kCtlCellPad = 6;
+// ---- the Controls page: its own rows (the layout preset, the button prompts) from kCtlTop, then kCtlGap (the grid's column
+// titles) and the grid: a row per control, then Reset to defaults (the rows kCtlRowH high: the page fits 720 lines) ----
+constexpr int kCtlWidth = 600, kCtlTop = 44, kCtlRowH = 22, kCtlGap = 22, kCtlPad = 200, kCtlKey = 390, kCtlCellPad = 6;
 // ---- the Cheats page (no tab strip), and its lists: the teleport list and the inventory ----
 constexpr int kCheatTop = 44, kCheatRowH = 28;   // the cheats' rows, from kCheatTop
 constexpr int kListTop = 48, kListRowH = 24;     // a list's lines (a section's heading is one too), from kListTop
 constexpr int kListValueRight = 16;              // a cheat's or a list line's value ends kListValueRight from the right
+// ---- the restart question (closing the menu with a setting that takes a restart): its two buttons, Later and Restart now ----
+constexpr int kAskHeight = 196;                  // the page's height (kWidth wide)
+constexpr int kAskButtonY = 120, kAskButtonH = 34;
+constexpr int kAskButtonX = 16, kAskButtonW = 150, kAskButtonGap = 16;   // Later at kAskButtonX, Restart now after the gap
 
 enum Part {
     kNone,      // off the menu's controls (still over the menu: a click does nothing)
@@ -28,10 +34,13 @@ enum Part {
     kTabNext,   // its right end
     kRow,       // an option's row: index (the tab's own), side -1 the value's left half, 1 its right half, 0 the name
     kSlider,    // a slider row's track: index, permille 0 to 1000 along it
+    kCtlOption, // the Controls page: one of its own rows above the grid (index), side -1 the value's left half, 1 its right
+                // half, 0 the name
     kCtlRow,    // the Controls page: a row's name (index; index == the count: Reset to defaults)
     kCtlCell,   // a binding: index the row, side 0 the gamepad's, 1 the keyboard's
     kCheatRow,  // the Cheats page: a row (index), side -1 the value's left half, 1 its right half, 0 the name
     kListLine,  // a list (the teleport list, the inventory): a line as shown (index, 0 the top one), side as kCheatRow
+    kButton,    // the restart question's buttons: index 0 Later, 1 Restart now
 };
 struct Hit {
     Part part = kNone;
@@ -48,11 +57,16 @@ inline void to_image(int x, int y, int win_w, int win_h, int img_w, int img_h, i
 }
 /// The menu's top left in the window's image: centred, as menu_record copies it
 inline void origin(int img_w, int img_h, int menu_w, int menu_h, int* x0, int* y0) {
-    *x0 = (img_w - menu_w) / 2;
-    *y0 = (img_h - menu_h) / 2;
+    // (centred; a menu taller or wider than the window from its top or left edge, so the title and the tabs show and the help
+    // below is what is cut: v2.0.13)
+    *x0 = img_w >= menu_w ? (img_w - menu_w) / 2 : 0;
+    *y0 = img_h >= menu_h ? (img_h - menu_h) / 2 : 0;
 }
 inline int rows_top(int s) { return (kTabY + kTabH + kRowGap) * s; }
-inline int tab_slot_w(int s, int w) { return (w - 2 * kTabSide * s) / 3; }
+constexpr int kTabs = 4;                  // Graphics, Gameplay, Controls, Debug
+/// The Controls page's grid: where its first row starts (at a scale of 1), under the page's own options rows
+inline int ctl_grid_top(int options) { return kCtlTop + options * kCtlRowH + kCtlGap; }
+inline int tab_slot_w(int s, int w) { return (w - 2 * kTabSide * s) / kTabs; }
 /// A slider's value for a point along its track (lo to hi in steps of step), nearest step, held to its ends
 inline int slider_value(int permille, int lo, int hi, int step) {
     if (step <= 0 || hi <= lo) return lo;
@@ -107,12 +121,21 @@ inline int slider_drag(int x, int s) {
     return p < 0 ? 0 : p > 1000 ? 1000 : p;
 }
 
-/// The Controls page: (x, y) in its pixels, w x h its size, s its scale; count the controls (then Reset to defaults)
-inline Hit controls(int x, int y, int s, int w, int h, int count) {
+/// The Controls page: (x, y) in its pixels, w x h its size, s its scale; options its own rows above the grid, count the
+/// controls (then Reset to defaults)
+inline Hit controls(int x, int y, int s, int w, int h, int count, int options = 0) {
     Hit hit;
     if (x < 0 || y < 0 || x >= w || y >= h) return hit.part = kOutside, hit;
-    const int top = kCtlTop * s;
-    if (y < top || x < kRowX * s || x >= w - kRowX * s) return hit;
+    if (x < kRowX * s || x >= w - kRowX * s) return hit;
+    if (y >= kCtlTop * s && y < (kCtlTop + options * kCtlRowH) * s) {
+        hit.part = kCtlOption;
+        hit.index = (y - kCtlTop * s) / (kCtlRowH * s);
+        const int vl = (kCtlPad - kCtlCellPad) * s, vr = w - kRowX * s;
+        if (x >= vl) hit.side = x < (vl + vr) / 2 ? -1 : 1;
+        return hit;
+    }
+    const int top = ctl_grid_top(options) * s;
+    if (y < top) return hit;
     const int i = (y - top) / (kCtlRowH * s);
     if (i > count) return hit;
     hit.index = i;
@@ -147,6 +170,17 @@ inline Hit cheats(int x, int y, int s, int w, int h, int count, const int* value
 /// A list page: count the lines shown (headings included); index is the line from the top as shown, not the item
 inline Hit list_lines(int x, int y, int s, int w, int h, int count, const int* value_l) {
     return row_list(x, y, s, w, h, kListTop, kListRowH, count, value_l, kListLine);
+}
+
+/// The restart question: (x, y) in its pixels, w x h its size, s its scale
+inline int ask_button_x(int i, int s) { return (kAskButtonX + i * (kAskButtonW + kAskButtonGap)) * s; }
+inline Hit ask(int x, int y, int s, int w, int h) {
+    Hit hit;
+    if (x < 0 || y < 0 || x >= w || y >= h) return hit.part = kOutside, hit;
+    if (y < kAskButtonY * s || y >= (kAskButtonY + kAskButtonH) * s) return hit;
+    for (int i = 0; i < 2; i++)
+        if (x >= ask_button_x(i, s) && x < ask_button_x(i, s) + kAskButtonW * s) hit.part = kButton, hit.index = i;
+    return hit;
 }
 
 } // namespace mkwvk::menu_hit
