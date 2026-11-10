@@ -1336,6 +1336,7 @@ void program_cache_load(uint64_t key, std::vector<std::unique_ptr<Program>>& var
             disk_records.erase(it);
         }
     }
+    PROF_EXACT();   // (from disk: a mesh program's too)
     program_cache_read(disk_in, &disk_mu, key, recs, variants);
 }
 
@@ -2010,6 +2011,7 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
 }
 
 const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]) {
+    PROF_EXACT();   // (the picks' slow path: a translation, a cache read; PROF_PROGRAM samples the rest)
     const bool compute = kind == ProgramKind::Compute;
     std::lock_guard lk(shader_mu);
     const std::vector<Code>& cs = codes_of(s);

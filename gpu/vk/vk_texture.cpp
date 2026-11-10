@@ -1550,6 +1550,7 @@ void forget_gpu(Texture* tex) {
 }
 
 Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw, int bh, int bpb) {
+    PROF_EXACT();   // (texture_get's slow path: PROF_TEXGET samples the rest)
     auto tex = std::make_unique<Texture>();
     Texture& x = *tex;
     x.gpu = t->gpu, x.d = t->d, x.L = t->L, x.nvn_format = t->d.format;
@@ -3210,6 +3211,15 @@ void texture_frame(uint64_t completed) {
                                      : 4096ull << 20;
         logf("vk: texture budget %llu MB (%s)", (unsigned long long)(own >> 20),
              getenv("RX_VK_VRAM_MB") ? "RX_VK_VRAM_MB" : known && allowed >= big_card ? "60% of what the driver allows" : "as upstream");
+    }
+    {   // (hookshot) an integrated GPU's "VRAM" is the system's RAM, which the game's own ~10 GB also needs: 70% of what the driver allows
+        // was 5.3 GB of textures on a 16 GB laptop with a Radeon 780M, and the PC ran out of memory in Hyrule Field within minutes
+        // (Discord, 2026-11-09). At most 2.5 GB there unless RX_VK_VRAM_MB says otherwise
+        static bool told;
+        if (!getenv("RX_VK_VRAM_MB") && dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && own > (2560ull << 20)) {
+            own = 2560ull << 20;
+            if (!told) told = true, logf("vk: an integrated GPU shares the system's RAM: textures at most 2560 MB (RX_VK_VRAM_MB=<MB>: other)");
+        }
     }
     const bool preset_budget = opts.vram_mb > 0 && preset_caps_memory();   // (a smaller preset on a bigger card: the card's own)
     uint64_t budget = preset_budget ? ((uint64_t)opts.vram_mb << 20) : own;
