@@ -494,6 +494,21 @@ void hos_bind(int set, int button, int slot, int code) {
 
 static volatile LONG pad_raw_now;   /* the gamepads' inputs at the last read, 1 << HOS_PAD_* */
 uint32_t hos_pad_raw(void) { return (uint32_t)pad_raw_now; }
+/* (hookshot) the kind of controller last used, for the Insert menu's button names (host->pad_kind): the SDL pad pressed
+   last (pad_sdl.c), or an XInput pad (an Xbox one) when that was pressed later. SDL wins a tie within 100 ms: a
+   DualSense that Steam or DS4Windows also shows as an XInput pad presses both. Before any press, the first SDL pad
+   open, else Xbox when an XInput pad is connected */
+static volatile LONG64 xinput_pressed_ns;
+static volatile LONG xinput_connected;
+int hos_pad_kind(void) {
+    int hos_sdl_pad_kind_last(int64_t *when);
+    int64_t sdl_ns = 0;
+    const int sdl = hos_sdl_pad_kind_last(&sdl_ns);
+    const int64_t x_ns = (int64_t)xinput_pressed_ns;
+    if (x_ns && (!sdl_ns || x_ns > sdl_ns + 100000000LL)) return HOS_PAD_KIND_XBOX;
+    if (sdl_ns || sdl != HOS_PAD_KIND_UNKNOWN) return sdl;
+    return xinput_connected ? HOS_PAD_KIND_XBOX : HOS_PAD_KIND_UNKNOWN;
+}
 
 static void pads_read(uint64_t *buttons, int32_t stick[4]) {
     static int64_t next_read, retry[XUSER_MAX_COUNT];
@@ -552,6 +567,8 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
             if (w & map[i].x) raw |= 1ULL << map[i].b;
         if (xs.Gamepad.bLeftTrigger > 64) raw |= 1ULL << HOS_PAD_LTRIGGER;
         if (xs.Gamepad.bRightTrigger > 64) raw |= 1ULL << HOS_PAD_RTRIGGER;
+        InterlockedExchange(&xinput_connected, 1);
+        if (w || xs.Gamepad.bLeftTrigger > 64 || xs.Gamepad.bRightTrigger > 64) InterlockedExchange64(&xinput_pressed_ns, now);
         const int16_t thumb[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
         int32_t v[4];
         for (int i = 0; i < 4; i++) {

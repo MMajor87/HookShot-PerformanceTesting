@@ -24,7 +24,11 @@ enum { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_BACK, BTN_GUIDE, BTN_START, BTN_LSTICK, B
 enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_LT, AX_RT };
 
 #define MAX_PADS 8
-static struct { void *gc; int32_t id; uint16_t rumble_lo, rumble_hi; int64_t rumble_ns; } pads[MAX_PADS];
+static struct { void *gc; int32_t id; int kind; uint16_t rumble_lo, rumble_hi; int64_t rumble_ns; } pads[MAX_PADS];
+/* (hookshot) the kind of the pad pressed last (HOS_PAD_KIND_*), when (hos_now_ns; 0: none pressed yet), and the first open
+   one's: hos_sdl_pad_kind_last, for the Insert menu's button names */
+static volatile LONG last_kind, first_kind;
+static volatile LONG64 last_kind_ns;
 static SRWLOCK state_lock = SRWLOCK_INIT;
 static uint64_t state_buttons;
 static int32_t state_stick[4];
@@ -117,6 +121,7 @@ static void pads_poll(void) {
                 if (!gc) continue;
                 pads[slot].gc = gc;
                 pads[slot].id = hos_sdl_pad_id(gc);
+                pads[slot].kind = hos_sdl_pad_kind(gc);
                 pads[slot].rumble_lo = pads[slot].rumble_hi = 0;
                 pads[slot].rumble_ns = 0;
                 hos_log("hid: controller \"%s\" connected (SDL)", hos_sdl_pad_name(gc));
@@ -134,10 +139,17 @@ static void pads_poll(void) {
             void *gc = pads[i].gc;
             if (!gc) continue;
             count++;
+            uint64_t pb = 0;
             for (int k = BTN_A; k <= BTN_RIGHT; k++)   /* (SDL3's gamepad buttons are in SDL2's order) */
-                if (hos_sdl_pad_button(gc, k)) b |= 1ULL << k;
-            if (hos_sdl_pad_axis(gc, AX_LT) > 8000) b |= 1ULL << HOS_PAD_LTRIGGER;
-            if (hos_sdl_pad_axis(gc, AX_RT) > 8000) b |= 1ULL << HOS_PAD_RTRIGGER;
+                if (hos_sdl_pad_button(gc, k)) pb |= 1ULL << k;
+            if (hos_sdl_pad_axis(gc, AX_LT) > 8000) pb |= 1ULL << HOS_PAD_LTRIGGER;
+            if (hos_sdl_pad_axis(gc, AX_RT) > 8000) pb |= 1ULL << HOS_PAD_RTRIGGER;
+            b |= pb;
+            if (count == 1) InterlockedExchange(&first_kind, pads[i].kind);
+            if (pb) {
+                InterlockedExchange(&last_kind, pads[i].kind);
+                InterlockedExchange64(&last_kind_ns, now);
+            }
             const int inv_x = rx_option(16, 0);
             const int inv_y = rx_option(17, 0);
             const int32_t v[4] = {stick_value(hos_sdl_pad_axis(gc, AX_LX), 0), stick_value(hos_sdl_pad_axis(gc, AX_LY), 1),
@@ -179,6 +191,18 @@ void hos_sdl_pads_pump(void) {
     if (state > 0) pads_poll();
 }
 #endif
+
+/* (hookshot) the kind of SDL pad pressed last and when (0: none pressed yet); before a press, the first open one's
+   (HOS_PAD_KIND_UNKNOWN with none open). For nn_hid.c's hos_pad_kind */
+int hos_sdl_pad_kind_last(int64_t *when) {
+    *when = (int64_t)last_kind_ns;
+    if (*when) return (int)last_kind;
+    int open = 0;
+    AcquireSRWLockShared(&state_lock);
+    open = state_count;
+    ReleaseSRWLockShared(&state_lock);
+    return open ? (int)first_kind : HOS_PAD_KIND_UNKNOWN;
+}
 
 /* The controllers' merged state (nn_hid.c): ORs their inputs in (1 << HOS_PAD_*), keeps the larger stick
    deflections; returns how many controllers SDL has open. Starts the SDL thread on the first call. */

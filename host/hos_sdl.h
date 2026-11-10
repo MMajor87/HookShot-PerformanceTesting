@@ -69,5 +69,6 @@ void hos_sdl_pads_update(void);
 int hos_sdl_pad_button(void *pad, int button);
 int16_t hos_sdl_pad_axis(void *pad, int axis);
 const char *hos_sdl_pad_name(void *pad);
+int hos_sdl_pad_kind(void *pad);   /* (hookshot) HOS_PAD_KIND_* (gpu/vk/vk_api.h) */
 int32_t hos_sdl_pad_id(void *pad);
 void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms);

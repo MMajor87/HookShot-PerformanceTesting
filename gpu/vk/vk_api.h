@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 8
+#define MKWVK_API_VERSION 9
 enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA };
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
@@ -27,6 +27,8 @@ enum { HOS_PAD_SOUTH, HOS_PAD_EAST, HOS_PAD_WEST, HOS_PAD_NORTH, HOS_PAD_BACK, H
        HOS_PAD_LSTICK, HOS_PAD_RSTICK, HOS_PAD_LSHOULDER, HOS_PAD_RSHOULDER, HOS_PAD_UP, HOS_PAD_DOWN, HOS_PAD_LEFT,
        HOS_PAD_RIGHT, HOS_PAD_LTRIGGER, HOS_PAD_RTRIGGER, HOS_PAD_N };
 enum { HOS_BIND_PAD, HOS_BIND_KEY };
+/* (hookshot) the kind of controller last used (host->pad_kind), for the Insert menu's button names */
+enum { HOS_PAD_KIND_UNKNOWN, HOS_PAD_KIND_XBOX, HOS_PAD_KIND_PLAYSTATION, HOS_PAD_KIND_NINTENDO };
 /* keys only (HOS_BIND_KEY), after the Switch's buttons: the left stick's and the camera's directions */
 enum { HOS_KEY_MOVE_UP = HOS_SW_N, HOS_KEY_MOVE_DOWN, HOS_KEY_MOVE_LEFT, HOS_KEY_MOVE_RIGHT, HOS_KEY_CAM_UP,
        HOS_KEY_CAM_DOWN, HOS_KEY_CAM_LEFT, HOS_KEY_CAM_RIGHT, HOS_KEY_N };
@@ -105,6 +107,9 @@ typedef struct MkwVkHost {
     int (*mic_count)(void);
     const char *(*mic_name)(int index);
     void (*mic_select)(int mode, const char *name, int index);
+    /* (hookshot) the kind of controller last pressed (HOS_PAD_KIND_*): SDL's type of the pad, an XInput pad an Xbox
+       one; before any press, the first one connected; UNKNOWN with none (host/nn_hid.c) */
+    int (*pad_kind)(void);
 } MkwVkHost;
 
 /* what the back end gives the executable: the rx_* functions (gpu/render/rx_nvn.h, rx_core) */
