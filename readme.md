@@ -47,11 +47,11 @@ This repository works on that **renderer**, with two goals:
 
 Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
 **drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
-generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.10**.
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.11**.
 
 ### What it changes
 
-Based on official Hookshot **v2.0.10** (since `v2.0.10-perf.1`; earlier releases here were based on v2.0.6). See the
+Based on official Hookshot **v2.0.11** (since `v2.0.11-perf.1`; earlier releases here were based on v2.0.10 and v2.0.6). See the
 [official release notes](https://github.com/NotRexed/Hookshot/releases) for what changed in the game itself:
 
 | Change | What it does | Setting (`hookshot_env.txt`) |
