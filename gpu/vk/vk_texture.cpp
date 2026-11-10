@@ -3727,7 +3727,7 @@ void texture_frame(uint64_t completed) {
     static uint64_t n_dead, b_dead, dead_logged_at;
     // (hookshot) the textures to go are chosen first and destroyed after; the write-backs among them go to the GPU in a few
     // batches (flush_textures), not one submission and one wait each: a sweep of 500 at a scene load stalled for seconds
-    struct Evict { Texture* tex; bool flush, shifted; };
+    struct Evict { Texture* tex; bool flush, shifted, overwritten; };
     std::vector<Evict> evict;
     uint64_t pending_bytes = 0;   // (chosen below, their bytes not yet off total_bytes)
     for (auto& [last, tex] : order) {
@@ -3794,7 +3794,7 @@ void texture_frame(uint64_t completed) {
         // tiled pattern over the Deku Tree's planks and Hyrule Field's path, with a 16 GB card's textures at the 6 GB budget
         // (issue 386). RX_VK_EVICT_NO_FLUSH=1: not written back, as before)
         static const bool no_flush = getenv("RX_VK_EVICT_NO_FLUSH") != nullptr;
-        evict.push_back({tex, !no_flush && !overwritten && tex->gpu_written && !tex->released && flushable(*tex), shifted});
+        evict.push_back({tex, !no_flush && !overwritten && tex->gpu_written && !tex->released && flushable(*tex), shifted, overwritten});
         pending_bytes += tex->bytes + tex->pad;
     }
     {   // (the write-backs: batches of up to 64 textures or ~512 MB of staging memory, each one submission and one wait)
@@ -3835,7 +3835,7 @@ void texture_frame(uint64_t completed) {
             remade.erase(tex);
             if (made_sum_on()) {
                 MadeKind& m = made_kind(tex);
-                m.evicted++, m.drawn_over += overwritten;
+                m.evicted++, m.drawn_over += e.overwritten;
             }
         }
         destroy_later(*tex);
