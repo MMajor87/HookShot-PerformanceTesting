@@ -3,7 +3,6 @@
    out differently (both read here at their offsets: SDL_Event is 128 bytes in SDL3, 56 in SDL2). */
 #include "hos.h"
 #include "hos_sdl.h"
-#include "../gpu/vk/vk_api.h"   /* (HOS_PAD_KIND_*) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +20,6 @@ static struct {
     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
     /* controllers */
     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
-    void *PadType;   /* (hookshot; optional: SDL2 before 2.0.12 has none) */
     void *GetGamepads, *GetGamepadID, *Free;   /* (SDL3) */
     void *NumJoysticks, *IsGameController, *DeviceInstanceID, *GetJoystick, *JoystickInstanceID;   /* (SDL2) */
 } f;
@@ -81,7 +79,6 @@ static int get_all(HMODULE m, int three) {
         GET(GetJoystick, "SDL_GameControllerGetJoystick");
         GET(JoystickInstanceID, "SDL_JoystickInstanceID");
     }
-    *(FARPROC *)&f.PadType = GetProcAddress(m, three ? "SDL_GetGamepadType" : "SDL_GameControllerGetType");
 #undef GET2
 #undef GET
     return 1;
@@ -526,17 +523,6 @@ int16_t hos_sdl_pad_axis(void *pad, int axis) { return CALL(int16_t (*)(void *, 
 const char *hos_sdl_pad_name(void *pad) {
     const char *n = CALL(const char *(*)(void *), PadName)(pad);
     return n ? n : "?";
-}
-/* (hookshot) SDL3's SDL_GamepadType: 2, 3 Xbox 360 and One; 4-6 PS3 to PS5; 7-10 Switch Pro and Joy-Cons. SDL2's
-   SDL_GameControllerType: 1, 2 Xbox; 3, 4, 7 PS3, PS4, PS5; 5 and 11-13 Switch Pro and Joy-Cons. Others: unknown */
-int hos_sdl_pad_kind(void *pad) {
-    if (!f.PadType) return HOS_PAD_KIND_UNKNOWN;
-    const int t = CALL(int (*)(void *), PadType)(pad);
-    if (version == 3)
-        return t == 2 || t == 3 ? HOS_PAD_KIND_XBOX : t >= 4 && t <= 6 ? HOS_PAD_KIND_PLAYSTATION
-             : t >= 7 && t <= 10 ? HOS_PAD_KIND_NINTENDO : HOS_PAD_KIND_UNKNOWN;
-    return t == 1 || t == 2 ? HOS_PAD_KIND_XBOX : t == 3 || t == 4 || t == 7 ? HOS_PAD_KIND_PLAYSTATION
-         : t == 5 || (t >= 11 && t <= 13) ? HOS_PAD_KIND_NINTENDO : HOS_PAD_KIND_UNKNOWN;
 }
 int32_t hos_sdl_pad_id(void *pad) {
     return version == 3 ? (int32_t)CALL(uint32_t (*)(void *), GetGamepadID)(pad)

@@ -39,7 +39,6 @@ import kit
 import lifted_c
 import rtgen
 import logo_rgba
-import pad_icons_rgba
 import toolchain
 import version
 import win_manifest
@@ -585,8 +584,6 @@ def main():
     # its bytes are part of vk_menu.cpp's dependencies
     gen_dir = os.path.join(out, "gen")
     logo_text = logo_rgba.write(os.path.join(gen_dir, "hookshot_logo.h")).encode()
-    # (hookshot) the Insert menu's PlayStation button icons, the same way (nx2/pad_icons_rgba.py)
-    logo_text += pad_icons_rgba.write(os.path.join(gen_dir, "hookshot_pad_icons.h")).encode()
     os.makedirs(obj_dir, exist_ok=True)
     if os.environ.get("RX_VK_ONLY"):   # (the Vulkan back end needs no game: built so with no lift, as the AppImage's is)
         os.makedirs(gen, exist_ok=True)
