@@ -1247,6 +1247,63 @@ std::vector<UpSlow> up_slowest;
 std::mutex up_mu;   // (uploads may come from a parallel replay's threads)
 std::atomic<int64_t> frame_upload_ns{0};   // (this frame's time in upload(), every thread's)
 std::atomic<int64_t> st_deferred{0}, st_deferred_frame{0};
+// (HookShot-PerformanceTesting, 2026-11-10) and what making a frame's new textures cost (create(): the image, its memory, its views),
+// which the upload budget did not count: a 3-hour play's longest frames (1-4 s, 3.3 s of it the draws' texture lookups) came at
+// area changes near the VRAM limit, with that frame's uploads at 50 ms. Over 50 ms, one log line with the slowest
+std::atomic<int64_t> frame_make_ns{0};
+struct MakeStat { int64_t n = 0, bytes = 0, ns = 0; };
+MakeStat make_frame;
+std::vector<UpSlow> make_slowest;   // (route unused)
+void make_frame_report() {
+    std::lock_guard lk(up_mu);
+    static int logged;
+    if (make_frame.ns >= 50000000 && logged < 300) {
+        logged++;
+        char line[600];
+        int k = snprintf(line, sizeof line, "vk: a frame's new textures took %.0f ms: %lld made (%.1f MB);", make_frame.ns / 1e6,
+                         (long long)make_frame.n, make_frame.bytes / 1048576.0);
+        std::sort(make_slowest.begin(), make_slowest.end(), [](const UpSlow& a, const UpSlow& b) { return a.ns > b.ns; });
+        for (size_t i = 0; i < make_slowest.size() && i < 4 && k < (int)sizeof line - 80; i++)
+            k += snprintf(line + k, sizeof line - k, " [%ux%u x%u NVN %#x %.1f MB %.0f ms]", make_slowest[i].w, make_slowest[i].h,
+                          make_slowest[i].layers, make_slowest[i].nvn, make_slowest[i].bytes / 1048576.0, make_slowest[i].ns / 1e6);
+        logf("%s", line);
+    }
+    make_frame = {};
+    make_slowest.clear();
+}
+void make_note(const Texture& tex, int64_t ns) {
+    frame_make_ns.fetch_add(ns, std::memory_order_relaxed);
+    std::lock_guard lk(up_mu);
+    make_frame.n++, make_frame.bytes += (int64_t)(tex.bytes + tex.pad), make_frame.ns += ns;
+    if (ns > 2000000) {
+        make_slowest.push_back({ns, tex.width, tex.height, tex.layers, tex.nvn_format, 0, tex.bytes + tex.pad});
+        if (make_slowest.size() > 64) {
+            std::sort(make_slowest.begin(), make_slowest.end(), [](const UpSlow& a, const UpSlow& b) { return a.ns > b.ns; });
+            make_slowest.resize(8);
+        }
+    }
+}
+/// (the budget the deferral below and make_defer share: this frame's uploads and new textures, every thread's, past
+/// RX_VK_UPLOAD_BUDGET_MS (40); RX_VK_MAKE_IN_BUDGET=0: the uploads alone, and no new texture left unmade, as before)
+int64_t upload_budget_ns() {
+    static const int64_t b = (int64_t)((getenv("RX_VK_UPLOAD_BUDGET_MS") ? atof(getenv("RX_VK_UPLOAD_BUDGET_MS")) : 40.0) * 1000000);
+    return b;
+}
+bool make_in_budget() {
+    static const bool on = !getenv("RX_VK_MAKE_IN_BUDGET") || atoi(getenv("RX_VK_MAKE_IN_BUDGET")) != 0;
+    return on;
+}
+bool frame_budget_spent() {
+    const int64_t spent = frame_upload_ns.load(std::memory_order_relaxed) +
+                          (make_in_budget() ? frame_make_ns.load(std::memory_order_relaxed) : 0);
+    return spent >= upload_budget_ns();
+}
+/// (a new ASTC texture a draw samples, past the budget: left unmade this frame; texture_get)
+bool make_defer() {
+    if (!upload_budget_ns() || !make_in_budget() || !upload_defer_ok || !frame_budget_spent()) return false;
+    st_deferred.fetch_add(1, std::memory_order_relaxed), st_deferred_frame.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 void upload_frame_report() {
     std::lock_guard lk(up_mu);
     int64_t ns = 0;
@@ -2151,7 +2208,10 @@ Texture* texture_get(const nvn_tex* t, bool for_sampling) {
     Texture* tex;
     auto it = textures.find(k);
     if (it == textures.end()) {
-        const auto t0 = made_sum_on() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        // (HookShot-PerformanceTesting, 2026-11-10) a new ASTC texture a draw samples, met after this frame's new textures and
+        // uploads took their budget: not made now either (upload_defer below: the placeholder this frame, made at a later look)
+        if (for_sampling && fi.astc && make_defer()) return nullptr;
+        const auto t0 = std::chrono::steady_clock::now();
         size_t beside = 0;
         if (made_sum_on()) {
             auto [a, e] = by_gpu.equal_range(t->gpu);
@@ -2159,6 +2219,7 @@ Texture* texture_get(const nvn_tex* t, bool for_sampling) {
         }
         tex = create(k, t, fi.format, fi.astc, bw, bh, bpb, !for_sampling);
         if (!tex) return nullptr;
+        make_note(*tex, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
         if (made_sum_on()) {
             const uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
             std::lock_guard lk(evicted_mu);
@@ -2234,9 +2295,8 @@ namespace {
 /// budget (40: only an area load's burst; at 8 the ground's streamed textures waited a frame in ordinary play and the ground
 /// flickered, Discord 2026-11-09), 0: no deferral, as before
 bool upload_defer(const Texture& tex) {
-    static const int64_t budget_ns = (int64_t)(getenv("RX_VK_UPLOAD_BUDGET_MS") ? atof(getenv("RX_VK_UPLOAD_BUDGET_MS")) : 40.0) * 1000000;
-    if (!budget_ns || !upload_defer_ok || tex.uploaded || !tex.astc || tex.gpu_written) return false;
-    if (frame_upload_ns.load(std::memory_order_relaxed) < budget_ns) return false;
+    if (!upload_budget_ns() || !upload_defer_ok || tex.uploaded || !tex.astc || tex.gpu_written) return false;
+    if (!frame_budget_spent()) return false;   // (and the new textures' making, above: RX_VK_MAKE_IN_BUDGET)
     st_deferred.fetch_add(1, std::memory_order_relaxed), st_deferred_frame.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -3286,14 +3346,16 @@ Texture* texture_for_present(const nvn_tex* t) {
 
 void texture_frame(uint64_t completed) {
     upload_frame_report();
+    make_frame_report();
     frame_upload_ns.store(0, std::memory_order_relaxed);
+    frame_make_ns.store(0, std::memory_order_relaxed);
     if (const int64_t d = st_deferred_frame.exchange(0, std::memory_order_relaxed)) {
         // (the views and descriptor sets resolved to the placeholder this frame go stale, as when textures go: the next frame
         // looks those textures up again, and uploads them)
         destroy_gen++;
         static int told;
         if (told++ < 40 || st_deferred.load(std::memory_order_relaxed) % 2000 < d)
-            logf("vk: %lld new ASTC textures left for a later frame (this frame's uploads took their budget; %lld so far)", (long long)d,
+            logf("vk: %lld new ASTC textures left for a later frame (this frame's uploads and new textures took their budget; %lld so far)", (long long)d,
                  (long long)st_deferred.load(std::memory_order_relaxed));
     }
     completed_value = completed;
