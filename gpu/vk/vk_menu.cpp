@@ -2429,6 +2429,13 @@ void draw_fps(ui::Ctx& c, bool under_banner) {
     outlined_right(c, c.f.strong, small, right, top + 14 * s, green, "FPS");
     outlined_right(c, c.f.strong, big, right - lw - 4 * s, top, green, fps_text);
     if (fps_sub[0]) outlined_right(c, c.f.strong, small, right, top + 32 * s, ui::rgba(226, 232, 226), fps_sub);
+    // (HookShot-PerformanceTesting) RX_VK_COMPACT_HUD=1: the VRAM compaction under it, yellow while one runs
+    char l1[96], l2[96];
+    if (const int hud = compact_hud_text(l1, sizeof l1, l2, sizeof l2)) {
+        const float y = top + (fps_sub[0] ? 47 : 32) * s;
+        outlined_right(c, c.f.strong, small, right, y, hud == 2 ? ui::rgba(255, 220, 70) : ui::rgba(226, 232, 226), l1);
+        if (l2[0]) outlined_right(c, c.f.strong, small, right, y + 15 * s, ui::rgba(226, 232, 226), l2);
+    }
 }
 
 /// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark. A little below the middle; what

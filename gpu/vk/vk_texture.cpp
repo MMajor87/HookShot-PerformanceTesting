@@ -3546,6 +3546,44 @@ struct Compact {
     bool pressed = false;
 } compact;
 const Texture* present_source = nullptr;   // (what the present shows this frame: do_present holds its image and view)
+// (HookShot-PerformanceTesting, 2026-11-10) RX_VK_COMPACT_HUD=1: lines under the FPS counter (vk_menu.cpp draw_fps) with the
+// compaction's runs, what they gave back and the driver's count, so a player sees how often it starts. Written by texture_frame
+// and compact_step on the renderer's thread, read by the menu's drawing: atomics, a snapshot each
+struct CompactHud {
+    std::atomic<uint64_t> runs{0}, moved{0}, freed{0}, used{0}, allowed{0}, pool_free{0};
+    std::atomic<int64_t> last_begin_ns{0};
+    std::atomic<bool> active{false};
+} compact_hud;
+bool compact_hud_on() {
+    static const bool v = getenv("RX_VK_COMPACT_HUD") && atoi(getenv("RX_VK_COMPACT_HUD")) != 0;
+    return v;
+}
+int compact_hud_text(char* line1, size_t n1, char* line2, size_t n2) {
+    if (!compact_hud_on()) return 0;
+    const auto r = std::memory_order_relaxed;
+    const double gb = 1024.0 * 1024 * 1024;
+    if (!compact_on()) {
+        snprintf(line1, n1, "compaction off");
+    } else {
+        const uint64_t runs = compact_hud.runs.load(r);
+        const int64_t last = compact_hud.last_begin_ns.load(r);
+        char ago[24] = "";
+        if (runs && last) {
+            const int64_t s = (std::chrono::steady_clock::now().time_since_epoch().count() - last) / 1000000000;
+            if (s < 120) snprintf(ago, sizeof ago, ", %llds ago", (long long)s);
+            else snprintf(ago, sizeof ago, ", %lldm ago", (long long)(s / 60));
+        }
+        snprintf(line1, n1, "compact %llu%s%s, %.2f GB back", (unsigned long long)runs, ago,
+                 compact_hud.active.load(r) ? " RUNNING" : "", compact_hud.freed.load(r) / gb);
+    }
+    const uint64_t allowed = compact_hud.allowed.load(r);
+    if (allowed)
+        snprintf(line2, n2, "VRAM %.1f/%.1f GB, %.2f free in blocks", compact_hud.used.load(r) / gb, allowed / gb,
+                 compact_hud.pool_free.load(r) / gb);
+    else
+        line2[0] = 0;
+    return compact_hud.active.load(r) ? 2 : 1;
+}
 void compact_step(uint64_t completed) {
     if (!compact_on()) return;
     if (compact.in_pass) {
@@ -3577,6 +3615,8 @@ void compact_step(uint64_t completed) {
             return;
         if (!image_compact_begin(64ull << 20, 12)) return;
         compact.runs++, compact.moved = compact.moved_bytes = compact.ignored = compact.passes = 0;
+        compact_hud.runs.store(compact.runs, std::memory_order_relaxed);
+        compact_hud.last_begin_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
         logf("vk: VRAM compaction %llu begins: the textures' blocks hold %llu MB, %llu MB of it free space",
              (unsigned long long)compact.runs, (unsigned long long)(block_bytes >> 20), (unsigned long long)(free_bytes >> 20));
     }
@@ -3893,7 +3933,16 @@ void texture_frame(uint64_t completed) {
     if (compact_on()) {
         uint64_t pool_blocks = 0, pool_free = 0;
         if (textures_pool_usage(&pool_blocks, &pool_free)) reclaim = vram_compact::reclaimable(block_free, pool_free);
+        compact_hud.pool_free.store(pool_free, std::memory_order_relaxed);
+    } else {
+        compact_hud.pool_free.store(block_free, std::memory_order_relaxed);   // (off: what all the blocks hold free)
     }
+    if (known) {
+        compact_hud.used.store(used, std::memory_order_relaxed);
+        compact_hud.allowed.store(allowed, std::memory_order_relaxed);
+    }
+    compact_hud.active.store(image_compact_active(), std::memory_order_relaxed);
+    compact_hud.freed.store(compact.all_freed, std::memory_order_relaxed);
     const uint64_t pressure = by_blocks ? used : used - std::min(used, reclaim);
     pool_pressed = known && pressure > allowed / 10 * 9;   // (the target pool given back meanwhile)
     compact.pressed = known && vram_compact::pressed(used, allowed);   // (hookshot, RX_VK_COMPACT: by the driver's own count)

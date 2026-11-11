@@ -93,6 +93,9 @@ int menu_free_camera();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)
 int menu_take_cheat_action();
 void menu_note_frame(bool game_frame, int shown = 1);   // (the frame rates the FPS counter shows)
+/// (HookShot-PerformanceTesting) RX_VK_COMPACT_HUD=1: the VRAM compaction's lines under the FPS counter (vk_texture.cpp).
+/// 0: off; 1: shown; 2: shown, a compaction running now
+int compact_hud_text(char* line1, size_t n1, char* line2, size_t n2);
 /// The game's picture's size (the Output resolution, its crop) and the window's, at each present: the Window scaling filter
 /// row says when it is not needed
 void menu_note_present_sizes(uint32_t picture_w, uint32_t picture_h, uint32_t window_w, uint32_t window_h);
