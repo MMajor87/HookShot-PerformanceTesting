@@ -47,27 +47,29 @@ This repository works on that **renderer**, with two goals:
 
 Each release ships the **full Hookshot Builder**, set up to build from this repository, and the renderer on its own as a
 **drop-in `hookshot_vk.dll`**. The Builder makes the game on your PC from your own copy, so the game executable and the
-generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.0.14**.
+generated code are never shared. Each release names the game version it is for. Currently that is **Hookshot v2.1.0**.
 
 ### What it changes
 
-Based on official Hookshot **v2.0.14** (since `v2.0.14-perf.1`; earlier releases here were based on v2.0.11, v2.0.10 and v2.0.6). See the
+Based on official Hookshot **v2.1.0** (since `v2.1.0-perf.1`; earlier releases here were based on v2.0.14, v2.0.11, v2.0.10 and v2.0.6). See the
 [official release notes](https://github.com/NotRexed/Hookshot/releases) for what changed in the game itself:
 
 | Change | What it does | Setting (`hookshot_env.txt`) |
 |---|---|---|
-| **Write-back limit** | The renderer copied every buffer the GPU wrote back to the game's memory after each batch of work: 26-68 MB a frame, about half the GPU's time in busy scenes. Most of it (the foliage culling's lists) is never read back by the game. Ranges over 1 MB now stay on the GPU; small results the game does read, such as the auto-exposure meter, are still copied. | `RX_VK_WB_MAX_KB=1024` (needed; 0 = off) |
+| **Write-back limit** | The renderer copied every buffer the GPU wrote back to the game's memory after each batch of work: 26-68 MB a frame, about half the GPU's time in busy scenes. Most of it (the foliage culling's lists) is never read back by the game. Ranges over 1 MB now stay on the GPU; small results the game does read, such as the auto-exposure meter, are still copied. Upstream has the same setting since v2.1.0. | `RX_VK_WB_MAX_KB=1024` (needed; 0 = off) |
 | **Sampler cache** | Each texture of each draw looked up its sampler through a lock, a copy and a hash, about 48,000 times a frame. Now cached until a sampler actually changes. | on; `RX_VK_SAMPLER_CACHE=0` = off |
 | **Texture descriptor reuse** | When a draw uses the same shader and the same textures as the previous draw, its texture setup is copied instead of rebuilt. | on; `RX_VK_TEX_REUSE=0` = off |
 | **Write collection** | The CPU-write tracking checks its pages under one lock. A small saving. Upstream has its own version of this since v2.0.10, so it has no switch any more. | on |
 | **Plant textures** | Upstream pull request [#761](https://github.com/NotRexed/Hookshot/pull/761) merged: compute shaders prepared before the game find their storage buffer table. Fixes most of the flat, white or green near-plant textures ([#763](https://github.com/NotRexed/Hookshot/issues/763), [#811](https://github.com/NotRexed/Hookshot/issues/811)). | always on |
 | **Texture budget on big cards** | Upstream caps texture memory at 6 GB. In Hyrule Castle that cap made the renderer evict textures and make them again every frame while walking (the renderer at 16-17.6 ms, 40-45 fps on a 16 GB card). Where the driver allows 12 GB or more, the budget is now 60% of that (about 9 GB on a 16 GB card). Smaller cards keep upstream's rule (45% on cards of 8 GB or less since v2.0.14). | on; `RX_VK_VRAM_MB=<MB>` sets it |
 | **Freeing overwritten render targets** | The castle makes its scene's render targets again almost every frame, each a little further along a running block of memory, so each new one overlaps the last few. The renderer only counted a render target as overwritten when a newer one started at exactly the same address, so the old ones piled up (about 6 GB) and pushed the scene's textures out of the budget. A render target that a newer one has drawn over in any part is now freed after 8 frames unused. Castle: render targets 6 GB to about 1 GB, texture lookups 1.5-4 ms to under 1 ms a frame, renderer 15-17 ms to 12-14 ms a frame (with `RX_VK_ASTC_BC_ALL=1`, VRAM 13.8 to 9.8 GB). | on; `RX_VK_EVICT_OVERLAPPED=0` = off |
+| **VRAM compaction** | Evicted textures leave holes in the driver's 128 MB memory blocks, and the driver counts each block whole: on long sessions 3 to 6.7 GB of what it counted was such free space. Upstream's opt-in compaction (v2.1.0) packs the remaining textures together and gives the emptied blocks back. Here, textures unused for about a minute are let go instead of copied, and nothing moves while an area is loading. A 1.5-hour play: 12 runs, 9.9 GB given back, free space held at 0.5 to 1.6 GB, no stutter from the runs. Without compaction, blocks that empty on their own are given back too. | **Recommended:** `RX_VK_COMPACT=1`; `RX_VK_COMPACT_HUD=1` shows it under the FPS counter |
+| **New textures in the upload budget** | At an area change, making hundreds of new textures could stretch one frame to 100-300 ms. Making them now counts toward the frame's upload time (`RX_VK_UPLOAD_BUDGET_MS`, 40), and once that is spent the rest of the new compressed textures wait for the next frame. | on; `RX_VK_MAKE_IN_BUDGET=0` = off |
 | **Depth image reuse** | Upstream has its own render target image pool since v2.0.12 (`RX_VK_TARGET_POOL_MB`, 256 MB), which covers this; ours was dropped in favour of it. | upstream's |
 | **Faster memory imports** | Upstream fixed the same import hitches since v2.0.12 by committing a block's pages in one call instead of asking Windows region by region; ours was dropped in favour of it. | upstream's |
 | **Smaller CPU savings** | A list of game-memory words was merged and sorted several times a frame even when nothing in it had changed (~4% of the renderer thread), and a setting was read from the environment at every compute dispatch. | always on |
 | **Evicting render targets (opt-in)** | Textures the GPU drew into are normally kept a minute after their last use. With this setting they can go after about a second, written back to the game's memory first where possible. It helped the castle before the two changes above; with them it should rarely be needed. | off; `RX_VK_EVICT_RENDERED=1` = on |
-| **Button prompts in this Builder** | The official Builder's Python lacks `archspec`, which the prompt drawing (astc-encoder-py) imports, so a game built on Windows showed only the Switch's icons. This Builder's Python includes it, so the Xbox, PlayStation and Steam Deck prompts are built. | always on |
+| **Button prompts in this Builder** | The official Builder's Python lacked `archspec`, which the prompt drawing (astc-encoder-py) imports, so a game built on Windows showed only the Switch's icons. Fixed upstream in v2.1.0; this Builder uses the same Python. | upstream's |
 | **Builder and updates from this repository** | The Builder's setup, the Builder's own update and the game's update check all use this repository, and every Builder part is mirrored in its `builder-parts` release. New renderer builds install themselves in seconds; a new game version is a full rebuild. See [Updates](#updates). | on; `RX_VK_UPDATE_CHECK=0` = off |
 | **F9 frame capture** | The capture writes its own `frame_log.txt` and a draw-stats report, and `RX_VK_DEEP` adds deeper captures for chosen shaders. See [Reporting a problem](#reporting-a-problem). | off until set |
 
@@ -109,8 +111,8 @@ official [What you need](https://github.com/NotRexed/Hookshot#what-you-need) lis
 2. Pick your game, choose where to install, and press **Build the game**. It takes about 10 to 45 minutes, depending on
    your CPU and memory.
 3. Open `hookshot_env.txt` in the game folder, next to `hookshot.exe` (create it if it isn't there), and copy in the
-   settings you want from the release's `hookshot_env.sample.txt`. At least `RX_VK_WB_MAX_KB=1024` (the biggest gain)
-   and `RX_VK_ASTC_BC_ALL=1` (smoother Hyrule Castle).
+   settings you want from the release's `hookshot_env.sample.txt`. At least `RX_VK_WB_MAX_KB=1024` (the biggest gain),
+   `RX_VK_ASTC_BC_ALL=1` (smoother Hyrule Castle) and `RX_VK_COMPACT=1` (VRAM given back on long sessions).
 4. Press **Play**. The first start prepares the shaders, which takes a while; later starts are faster.
 
 This folder then follows this repository: new renderer builds and new game versions are offered from here.
@@ -174,6 +176,10 @@ All settings go in `hookshot_env.txt` in the game folder, one `NAME=VALUE` per l
 | `RX_VK_EVICT_OVERLAPPED=0` | on (8 frames) | Turns off freeing render targets that a newer one has drawn over. A number sets how many frames unused first. Try `0` if something flickers or shows an old frame. |
 | `RX_VK_EVICT_RENDERED=1` | off | Lets render targets be evicted after about a second unused. Rarely needed now; remove it if black, garbage or rainbow textures appear. |
 | `RX_VK_ASTC_BC_ALL=1` | off on cards with 6 GB or more | **Recommended.** Keeps the finer compressed textures smaller in VRAM too: in Hyrule Castle 2.5 GB instead of 5.8 GB of the 9 GB budget, so textures stop being evicted and loaded again while walking. No visible difference in testing. |
+| `RX_VK_COMPACT=1` | off | **Recommended.** VRAM compaction: packs textures together and gives emptied memory blocks back to the driver. |
+| `RX_VK_COMPACT_HUD=1` | off | Two lines under the FPS counter: compaction runs, when the last one started, VRAM given back, VRAM used and allowed. |
+| `RX_VK_COMPACT_DROP_COLD=<frames>` | 3600 | How long a texture is unused before compaction lets it go instead of copying it. `0` copies every one, as upstream does. |
+| `RX_VK_TARGET_POOL_MB=<MB>` | 256 | Render target images kept for reuse. `1024` cut new ones 3x in testing, for ~750 MB more VRAM. |
 | `HOS_PIN=MainThread=FFFF,Presentation=FFFF,ModuleSystemWorker=FFFF` | off | Intel CPUs with performance and efficiency cores (12th gen and newer, 8 performance cores): keeps the game's busiest threads on the performance cores. A few fps in testing. |
 | `HOOKSHOT_NO_UPDATE_CHECK=1` | off | Stops the official launcher's update offer. |
 
