@@ -3541,6 +3541,7 @@ struct Compact {
     std::vector<VkImageView> old_views;
     uint64_t next_check = 0;               // (the present from which another compaction may start)
     uint64_t moved = 0, moved_bytes = 0, ignored = 0, passes = 0;   // (of the compaction under way)
+    uint64_t dropped = 0, dropped_bytes = 0, waited = 0;              // (HookShot-PerformanceTesting: compact_step's cold ones, busy frames)
     uint64_t runs = 0, all_moved = 0, all_freed = 0;
     // (the driver's count over 90% of what it allows, texture_frame's look every 10 presents: vram_compact.h)
     bool pressed = false;
@@ -3584,7 +3585,37 @@ int compact_hud_text(char* line1, size_t n1, char* line2, size_t n2) {
         line2[0] = 0;
     return compact_hud.active.load(r) ? 2 : 1;
 }
-void compact_step(uint64_t completed) {
+// (HookShot-PerformanceTesting, 2026-11-11) a texture a pass would move that nothing has used for RX_VK_COMPACT_DROP_COLD presents (3600, a
+// minute; 0: every one copied, as upstream) and whose texels are the game's memory's (not drawn by the GPU, uploaded): let go instead,
+// as eviction would, its memory freed by VMA at the pass's end (VMA_DEFRAGMENTATION_MOVE_OPERATION_DESTROY). A play's 12 compactions
+// copied 8.4 GB on the GPU for 9.9 GB given back, mostly an area left behind; such a texture made again later is uploaded from memory
+uint64_t compact_drop_cold() {
+    static const uint64_t v = getenv("RX_VK_COMPACT_DROP_COLD") ? (uint64_t)std::max(0, atoi(getenv("RX_VK_COMPACT_DROP_COLD"))) : 3600;
+    return v;
+}
+bool compact_droppable(const Texture* t, uint64_t completed) {
+    const uint64_t cold = compact_drop_cold();
+    return cold && t && t->image && !t->sparse && t != present_source && !t->gpu_written && t->uploaded && !t->pool_key &&
+           t->last_value <= completed && frame_no - t->last_frame >= cold;
+}
+void compact_drop(Texture* t) {   // (eviction's bookkeeping, its memory left to VMA's pass)
+    watch_tex(t, "dropped by the compaction");
+    if (!remade_skip_old()) {
+        std::lock_guard lk(from_memory_mu);
+        if (evicted_from_memory.size() > 50000) evicted_from_memory.clear();
+        evicted_from_memory[evicted_key(t->gpu, t->width, t->height, t->nvn_format)] = t->guest_size;
+    }
+    compact.old_images.push_back(t->image);
+    for (auto& kv : t->views)
+        if (kv.second) compact.old_views.push_back(kv.second);
+    t->views.clear();
+    t->image = VK_NULL_HANDLE, t->allocation = nullptr;   // (destroy_later below: nothing left of it to destroy)
+    destroy_later(*t);
+    forget_gpu(t);
+}
+// (busy: the frame before spent its upload budget (uploads and new textures, RX_VK_UPLOAD_BUDGET_MS): an area loading. No pass opens
+// then: its copies go into the same frame's upload commands, and the frame waits on them)
+void compact_step(uint64_t completed, bool busy) {
     if (!compact_on()) return;
     if (compact.in_pass) {
         if (compact.value > completed) return;   // (the GPU has not run the copies yet)
@@ -3596,11 +3627,12 @@ void compact_step(uint64_t completed) {
         uint32_t blocks = 0;
         if (!image_compact_pass_end(&freed, &blocks)) {
             compact.all_moved += compact.moved, compact.all_freed += freed;
-            logf("vk: VRAM compacted: %llu textures moved (%llu MB) in %llu passes, %llu left where they were; %u blocks (%llu MB) "
-                 "given back to the driver; %llu MB in all so far", (unsigned long long)compact.moved,
-                 (unsigned long long)(compact.moved_bytes >> 20), (unsigned long long)compact.passes,
-                 (unsigned long long)compact.ignored, blocks, (unsigned long long)(freed >> 20),
-                 (unsigned long long)(compact.all_freed >> 20));
+            logf("vk: VRAM compaction %llu over: %llu textures moved (%llu MB) in %llu passes, %llu left where they were, %llu unused "
+                 "ones let go (%llu MB), %llu busy frames waited; %u blocks (%llu MB) given back to the driver, %llu MB in all so far",
+                 (unsigned long long)compact.runs, (unsigned long long)compact.moved, (unsigned long long)(compact.moved_bytes >> 20),
+                 (unsigned long long)compact.passes, (unsigned long long)compact.ignored, (unsigned long long)compact.dropped,
+                 (unsigned long long)(compact.dropped_bytes >> 20), (unsigned long long)compact.waited, blocks,
+                 (unsigned long long)(freed >> 20), (unsigned long long)(compact.all_freed >> 20));
             compact.next_check = frame_no + vram_compact::rest(compact.pressed);
         }
         return;   // (the images the GPU is done with are freed now, before the next pass opens)
@@ -3615,21 +3647,27 @@ void compact_step(uint64_t completed) {
             return;
         if (!image_compact_begin(64ull << 20, 12)) return;
         compact.runs++, compact.moved = compact.moved_bytes = compact.ignored = compact.passes = 0;
+        compact.dropped = compact.dropped_bytes = compact.waited = 0;
         compact_hud.runs.store(compact.runs, std::memory_order_relaxed);
         compact_hud.last_begin_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
         logf("vk: VRAM compaction %llu begins: the textures' blocks hold %llu MB, %llu MB of it free space",
              (unsigned long long)compact.runs, (unsigned long long)(block_bytes >> 20), (unsigned long long)(free_bytes >> 20));
+    }
+    if (busy) {   // (above: the next pass waits for a frame with its budget to spare)
+        compact.waited++;
+        return;
     }
     static thread_local std::vector<ImageMove> moves;
     uint64_t freed_now = 0;
     uint32_t blocks_now = 0;
     if (!image_compact_pass(moves, &freed_now, &blocks_now)) {   // (nothing left to move)
         compact.all_moved += compact.moved, compact.all_freed += freed_now;
-        logf("vk: VRAM compaction %llu over: %llu textures moved (%llu MB) in %llu passes, %llu left where they were; %u blocks "
-             "(%llu MB) given back to the driver, %llu MB in all so far", (unsigned long long)compact.runs,
-             (unsigned long long)compact.moved, (unsigned long long)(compact.moved_bytes >> 20), (unsigned long long)compact.passes,
-             (unsigned long long)compact.ignored, blocks_now, (unsigned long long)(freed_now >> 20),
-             (unsigned long long)(compact.all_freed >> 20));
+        logf("vk: VRAM compaction %llu over: %llu textures moved (%llu MB) in %llu passes, %llu left where they were, %llu unused ones "
+             "let go (%llu MB), %llu busy frames waited; %u blocks (%llu MB) given back to the driver, %llu MB in all so far",
+             (unsigned long long)compact.runs, (unsigned long long)compact.moved, (unsigned long long)(compact.moved_bytes >> 20),
+             (unsigned long long)compact.passes, (unsigned long long)compact.ignored, (unsigned long long)compact.dropped,
+             (unsigned long long)(compact.dropped_bytes >> 20), (unsigned long long)compact.waited, blocks_now,
+             (unsigned long long)(freed_now >> 20), (unsigned long long)(compact.all_freed >> 20));
         compact.next_check = frame_no + vram_compact::rest(compact.pressed);
         return;
     }
@@ -3638,9 +3676,17 @@ void compact_step(uint64_t completed) {
     for (auto& kv : textures)
         if (kv.second->allocation) by_allocation[kv.second->allocation] = kv.second.get();
     VkCommandBuffer cmd = VK_NULL_HANDLE;
+    std::vector<Texture*> gone;
     for (size_t i = 0; i < moves.size(); i++) {
         const auto f = by_allocation.find(moves[i].src);
         Texture* t = f == by_allocation.end() ? nullptr : f->second;   // (none: an image the GPU is not done with)
+        if (compact_droppable(t, completed)) {   // (above)
+            image_compact_destroy(i);
+            compact.dropped++, compact.dropped_bytes += t->bytes + t->pad;
+            compact_drop(t);
+            gone.push_back(t);
+            continue;
+        }
         const VkImageUsageFlags both = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         bool ok = t && t->image && !t->sparse && t != present_source && t->samples == VK_SAMPLE_COUNT_1_BIT &&
                   (t->usage & both) == both;
@@ -3702,16 +3748,32 @@ void compact_step(uint64_t completed) {
         compact.moved++, compact.moved_bytes += t->bytes + t->pad;
     }
     compact.passes++;
+    if (!gone.empty()) {   // (as eviction's end: out of the cache; their images go with the pass's old ones)
+        for (auto it = textures.begin(); it != textures.end() && !gone.empty();) {
+            auto g = std::find(gone.begin(), gone.end(), it->second.get());
+            if (g != gone.end()) {
+                *g = gone.back(), gone.pop_back();
+                it = textures.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!cmd) {   // (nothing copied: the GPU is past the dropped ones already; the next step ends the pass)
+            compact.in_pass = true, compact.value = 0;
+            return;
+        }
+    }
     if (!cmd) {   // (nothing of this pass could be moved: ended at once)
         uint64_t freed = 0;
         uint32_t blocks = 0;
         if (!image_compact_pass_end(&freed, &blocks)) {
             compact.all_moved += compact.moved, compact.all_freed += freed;
-            logf("vk: VRAM compacted: %llu textures moved (%llu MB) in %llu passes, %llu left where they were; %u blocks (%llu MB) "
-                 "given back to the driver; %llu MB in all so far", (unsigned long long)compact.moved,
-                 (unsigned long long)(compact.moved_bytes >> 20), (unsigned long long)compact.passes,
-                 (unsigned long long)compact.ignored, blocks, (unsigned long long)(freed >> 20),
-                 (unsigned long long)(compact.all_freed >> 20));
+            logf("vk: VRAM compaction %llu over: %llu textures moved (%llu MB) in %llu passes, %llu left where they were, %llu unused "
+                 "ones let go (%llu MB), %llu busy frames waited; %u blocks (%llu MB) given back to the driver, %llu MB in all so far",
+                 (unsigned long long)compact.runs, (unsigned long long)compact.moved, (unsigned long long)(compact.moved_bytes >> 20),
+                 (unsigned long long)compact.passes, (unsigned long long)compact.ignored, (unsigned long long)compact.dropped,
+                 (unsigned long long)(compact.dropped_bytes >> 20), (unsigned long long)compact.waited, blocks,
+                 (unsigned long long)(freed >> 20), (unsigned long long)(compact.all_freed >> 20));
             compact.next_check = frame_no + vram_compact::rest(compact.pressed);
         }
         return;
@@ -3747,6 +3809,7 @@ uint64_t preset_texture_budget(uint64_t preset_mb, bool preset_applies, bool vra
 }
 
 void texture_frame(uint64_t completed) {
+    const bool last_frame_busy = upload_budget_ns() && frame_budget_spent();   // (compact_step: before the counts start again below)
     upload_frame_report();
     make_frame_report();
     frame_upload_ns.store(0, std::memory_order_relaxed);
@@ -3857,7 +3920,7 @@ void texture_frame(uint64_t completed) {
         }
     }
     bc_scratch_idle();
-    compact_step(completed);   // (hookshot, RX_VK_COMPACT: while its pass is open nothing of the textures' pool is freed)
+    compact_step(completed, last_frame_busy);   // (hookshot, RX_VK_COMPACT: while its pass is open nothing of the textures' pool is freed)
     for (auto it = dead.begin(); it != dead.end();) {
         if (compact.in_pass) break;   // (hookshot, RX_VK_COMPACT: nothing is freed while a pass is open; a frame or two)
         if (it->value > completed) {

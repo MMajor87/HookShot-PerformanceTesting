@@ -269,6 +269,8 @@ bool image_compact_pass(std::vector<ImageMove>& moves, uint64_t* freed_bytes, ui
 /// The new image of move i bound at its new place; false: not bound (the caller destroys the image and ignores the move)
 bool image_compact_bind(size_t i, VkImage image);
 void image_compact_ignore(size_t i);
+/// (HookShot-PerformanceTesting) the pass's move i not made: its allocation freed by VMA at the pass's end (the texture let go)
+void image_compact_destroy(size_t i);
 /// The pass ended (its old images destroyed by the caller, nothing of the pool freed since it began). False: that was
 /// the last one; then *freed_bytes and *freed_blocks say what went back to the driver in all
 bool image_compact_pass_end(uint64_t* freed_bytes, uint32_t* freed_blocks);

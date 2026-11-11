@@ -8,6 +8,7 @@
 #include <vk_mem_alloc.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <vector>
 
@@ -16,6 +17,15 @@
 namespace mkwvk {
 
 VmaAllocator vma;
+
+// (HookShot-PerformanceTesting, 2026-11-11) new device memory objects (VMA's blocks and dedicated allocations), counted per thread:
+// create_image logs a slow image with the vkAllocateMemory calls it made. A play with compaction had single textures made in
+// 60-330 ms (2048x1152, 9 MB: 66 ms) before and after the compactions; a new block from the driver near the VRAM limit, or not
+thread_local uint32_t memory_objects_made = 0;
+thread_local uint64_t memory_bytes_made = 0;
+void VKAPI_PTR on_device_memory_made(VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize size, void*) {
+    memory_objects_made++, memory_bytes_made += size;
+}
 
 bool vma_init(PFN_vkGetInstanceProcAddr gipa) {
     VmaVulkanFunctions f{};
@@ -29,6 +39,8 @@ bool vma_init(PFN_vkGetInstanceProcAddr gipa) {
     ci.instance = dev.instance;
     ci.vulkanApiVersion = VK_API_VERSION_1_3;
     ci.pVulkanFunctions = &f;
+    static VmaDeviceMemoryCallbacks memory_callbacks{on_device_memory_made, nullptr, nullptr};
+    ci.pDeviceMemoryCallbacks = &memory_callbacks;
     ci.preferredLargeHeapBlockSize = 64ull << 20;   // (64 MB blocks: Eglantine found 256 MB ones wasted VRAM)
     return vmaCreateAllocator(&ci, &vma) == VK_SUCCESS;
 }
@@ -177,6 +189,10 @@ void image_compact_ignore(size_t i) {
     if (compact_in_pass && i < compact_pass.moveCount)
         compact_pass.pMoves[i].operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_IGNORE;
 }
+void image_compact_destroy(size_t i) {
+    if (compact_in_pass && i < compact_pass.moveCount)
+        compact_pass.pMoves[i].operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_DESTROY;
+}
 bool image_compact_pass_end(uint64_t* freed_bytes, uint32_t* freed_blocks) {
     if (!compact_ctx || !compact_in_pass) return false;
     compact_in_pass = false;
@@ -184,7 +200,24 @@ bool image_compact_pass_end(uint64_t* freed_bytes, uint32_t* freed_blocks) {
     return compact_over(freed_bytes, freed_blocks);
 }
 
+bool create_image_(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures,
+                   const char*& how);
 bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint32_t objects0 = memory_objects_made;
+    const uint64_t bytes0 = memory_bytes_made;
+    const char* how = "?";
+    const bool ok = create_image_(ci, image, allocation, dedicated, target, textures, how);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    static std::atomic<int> told{0};
+    if (ms >= 20 && told++ < 200)
+        logf("vk: an image's memory took %.1f ms: %ux%u x%u levels %u format %d, %s%s; %u new memory objects (%llu MB)", ms,
+             ci.extent.width, ci.extent.height, ci.arrayLayers, ci.mipLevels, (int)ci.format, ok ? "" : "NOT MADE, ", how,
+             memory_objects_made - objects0, (unsigned long long)((memory_bytes_made - bytes0) >> 20));
+    return ok;
+}
+bool create_image_(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures,
+                   const char*& how) {
     VmaAllocationCreateInfo ai{};
     ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     // (in VRAM or not at all: an image VMA puts in system memory when VRAM is full is read over PCIe every frame,
@@ -194,6 +227,7 @@ bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& al
     if (dedicated) {   // (a memory object of its own, which freeing gives back whole: a pool's block is kept by VMA when it empties)
         VmaAllocationCreateInfo dai = ai;
         dai.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        how = "dedicated";
         if (vmaCreateImage(vma, &ci, &dai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
     }
     static const bool no_pool = getenv("RX_VK_NO_IMAGE_POOL") != nullptr;
@@ -203,9 +237,33 @@ bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& al
         VmaAllocationCreateInfo pai = ai;
         pai.pool = pool;
         pai.usage = VMA_MEMORY_USAGE_UNKNOWN;
-        if (vmaCreateImage(vma, &ci, &pai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
+        how = pool == texture_pool ? "textures' pool" : pool == image_pool ? "images' pool" : "targets' pool";
+        // (HookShot-PerformanceTesting, 2026-11-11) vmaCreateImage's three steps one by one, each timed: a bench's D32 render targets
+        // took 25-45 ms here with no new memory object (a 128x128 one 34 ms). The slow line below says which step it was
+        using clk = std::chrono::steady_clock;
+        const auto t0 = clk::now();
+        if (vkCreateImage(dev.device, &ci, nullptr, &image) == VK_SUCCESS) {
+            const auto t1 = clk::now();
+            if (vmaAllocateMemoryForImage(vma, image, &pai, &allocation, nullptr) == VK_SUCCESS) {
+                const auto t2 = clk::now();
+                if (vmaBindImageMemory(vma, allocation, image) == VK_SUCCESS) {
+                    const auto t3 = clk::now();
+                    const auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+                    static thread_local char steps[96];
+                    snprintf(steps, sizeof steps, "%s (create %.1f, place %.1f, bind %.1f ms)", how, ms(t0, t1), ms(t1, t2), ms(t2, t3));
+                    how = steps;
+                    return true;
+                }
+                vmaFreeMemory(vma, allocation);
+                allocation = nullptr;
+            }
+            vkDestroyImage(dev.device, image, nullptr);
+            image = VK_NULL_HANDLE;
+        }
     }
+    how = "default pools (a pool's failed)";
     if (vmaCreateImage(vma, &ci, &ai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
+    how = "over the budget";
     if (ai.flags & VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT) {
         static std::atomic<int> told_budget{0};
         if (told_budget++ < 10) logf("vk: image over budget, retrying without WITHIN_BUDGET");
@@ -218,6 +276,7 @@ bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& al
     if (getenv("RX_VK_IMAGES_VRAM_ONLY")) return false;
     VmaAllocationCreateInfo sai{};
     sai.usage = VMA_MEMORY_USAGE_AUTO;
+    how = "system memory";
     if (vmaCreateImage(vma, &ci, &sai, &image, &allocation, nullptr) != VK_SUCCESS) return false;
     static std::atomic<int> told{0};
     if (told++ < 4) logf("vk: VRAM full: a %ux%u image (format %d) in system memory", ci.extent.width, ci.extent.height, (int)ci.format);
