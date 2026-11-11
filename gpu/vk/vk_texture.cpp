@@ -3608,6 +3608,65 @@ void texture_frame(uint64_t completed) {
                     n_went = b_went = 0;
         }
     }
+    // (HookShot-PerformanceTesting, 2026-11-10) sparse image blocks given back. VMA frees a block of the textures' pool only once it
+    // is empty, and new images go into the fullest blocks: after an area's textures went, the few left were spread over all of them.
+    // A 3-hour play on a 16 GB card: the pool's 59-64 blocks (7.5-8.2 GB) held 1.6-2.2 GB of images after area changes, VRAM sat
+    // at 13.5-14 GB of the 14.6 the driver allows with 5-7 GB of it free in the blocks, and the longest frames (1-4 s) came there.
+    // Every 600 presents near what the driver allows (85%) with over 1 GB free in the blocks: a block filled RX_VK_COMPACT_FILL
+    // percent or less (25) whose images are all textures from the game's memory (uploaded or decoded, made again from there),
+    // unused for RX_VK_COMPACT_UNUSED presents (600), loses them, and VMA gives the block back. At most 8 blocks a time.
+    // RX_VK_COMPACT_BLOCKS=0: off
+    static const bool compact_on = !getenv("RX_VK_COMPACT_BLOCKS") || atoi(getenv("RX_VK_COMPACT_BLOCKS")) != 0;
+    static const uint64_t compact_fill =
+        getenv("RX_VK_COMPACT_FILL") ? (uint64_t)std::clamp(atoi(getenv("RX_VK_COMPACT_FILL")), 1, 90) : 25;
+    static const uint64_t compact_unused =
+        getenv("RX_VK_COMPACT_UNUSED") ? (uint64_t)std::max(60, atoi(getenv("RX_VK_COMPACT_UNUSED"))) : 600;
+    if (!no_evict && compact_on && known && frame_no % 600 == 300 && used > allowed / 100 * 85 && block_free > (1ull << 30)) {
+        struct Held { uint32_t n = 0; bool pinned = false; std::vector<Texture*> tex; };
+        std::unordered_map<VkDeviceMemory, Held> held;
+        for (auto& kv : textures) {
+            Texture* t = kv.second.get();
+            const VkDeviceMemory m = image_block_of(t->allocation);
+            if (!m) continue;
+            Held& h = held[m];
+            h.n++;
+            if (t->gpu_written || t->sparse || !t->uploaded || frame_no - t->last_frame < compact_unused || t->last_value > completed)
+                h.pinned = true;
+            else
+                h.tex.push_back(t);
+        }
+        std::vector<ImageBlockUse> blocks = image_block_uses();
+        std::sort(blocks.begin(), blocks.end(), [](const ImageBlockUse& a, const ImageBlockUse& b) { return a.used < b.used; });
+        size_t sparse_n = 0, freed_blocks = 0, freed_tex = 0;
+        uint64_t freed_bytes = 0;
+        std::unordered_set<Texture*> went;
+        for (const ImageBlockUse& b : blocks) {
+            if (!b.images || b.used * 100 > b.size * compact_fill) continue;
+            sparse_n++;
+            auto h = held.find(b.memory);
+            // (only a block all of whose images are such textures: one image left keeps the whole block)
+            if (h == held.end() || h->second.pinned || h->second.n != b.images || freed_blocks >= 8) continue;
+            freed_blocks++, freed_bytes += b.size;
+            for (Texture* tex : h->second.tex) {
+                watch_tex(tex, "evicted (a sparse image block given back)");
+                if (!remade_skip_old()) {   // (above: made again, it is uploaded from memory)
+                    std::lock_guard lk(from_memory_mu);
+                    if (evicted_from_memory.size() > 50000) evicted_from_memory.clear();
+                    evicted_from_memory[evicted_key(tex->gpu, tex->width, tex->height, tex->nvn_format)] = tex->guest_size;
+                }
+                destroy_later(*tex);
+                forget_gpu(tex);
+                went.insert(tex);
+                freed_tex++;
+            }
+        }
+        if (!went.empty())
+            for (auto it = textures.begin(); it != textures.end();) it = went.count(it->second.get()) ? textures.erase(it) : std::next(it);
+        if (sparse_n)
+            logf("vk: image blocks filled %llu%% or less: %zu of %zu; %zu given back (%llu MB, %zu textures unused for %llu presents "
+                 "evicted)", (unsigned long long)compact_fill, sparse_n, blocks.size(), freed_blocks,
+                 (unsigned long long)(freed_bytes >> 20), freed_tex, (unsigned long long)compact_unused);
+    }
     // (hookshot) under the budget, every 600 presents: the render targets drawn over since (below), unused for 120
     const bool sweep = total_bytes <= budget;
     // (hookshot-amd) and every 60 presents for the render targets drawn over by one at another start (below): OoT makes a frame's

@@ -202,6 +202,29 @@ void vma_log_image_blocks() {
              (unsigned long long)(d.unusedRangeSizeMax >> 20));
     }
 }
+/// (HookShot-PerformanceTesting, 2026-11-10) the textures' image pool, block by block: each one's memory object, how many
+/// images it holds and their bytes. For texture_compact_blocks (vk_texture.cpp)
+std::vector<ImageBlockUse> image_block_uses() {
+    std::vector<ImageBlockUse> out;
+    if (!image_pool) return out;
+    VmaBlockVector& bv = image_pool->m_BlockVector;
+    VmaMutexLockRead lock(bv.GetMutex(), vma->m_UseMutex);
+    out.reserve(bv.GetBlockCount());
+    for (size_t i = 0; i < bv.GetBlockCount(); i++) {
+        const VmaDeviceMemoryBlock* b = bv.GetBlock(i);
+        const uint64_t size = b->m_pMetadata->GetSize();
+        out.push_back({b->GetDeviceMemory(), (uint32_t)b->m_pMetadata->GetAllocationCount(),
+                       size - std::min<uint64_t>(size, b->m_pMetadata->GetSumFreeSize()), size});
+    }
+    return out;
+}
+/// (the textures' image pool's block an image's allocation is in; null when it is in another pool, a dedicated one or the default ones)
+VkDeviceMemory image_block_of(VmaAllocation a) {
+    if (!a || !image_pool || a->GetType() != VmaAllocation_T::ALLOCATION_TYPE_BLOCK || a->GetParentPool() != image_pool)
+        return VK_NULL_HANDLE;
+    return a->GetMemory();
+}
+
 void vma_log_heaps() {
     VmaBudget b[VK_MAX_MEMORY_HEAPS]{};
     vmaGetHeapBudgets(vma, b);
