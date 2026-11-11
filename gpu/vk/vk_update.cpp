@@ -23,7 +23,7 @@ namespace {
 #ifndef PERF_BUILD_NUMBER
 #define PERF_BUILD_NUMBER 1
 #endif
-constexpr const char* kGameVersion = "v2.0.14";
+constexpr const char* kGameVersion = "v2.1.0";
 constexpr int kPerfBuild = PERF_BUILD_NUMBER;   // (a test build overrides it: -DPERF_BUILD_NUMBER=0)
 constexpr const wchar_t* kApiHost = L"api.github.com";
 constexpr const wchar_t* kLatestPath = L"/repos/MMajor87/HookShot-PerformanceTesting/releases/latest";
